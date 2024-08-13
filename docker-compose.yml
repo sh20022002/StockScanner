@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  db:
+    image: mongo:4.4
+    container_name: db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      SmartTraid:
+        ipv4_address: 172.18.0.2
+    ports:
+      - '27017:27017'
+      
+  server:
+    container_name: server
+    depends_on:
+      - db
+    build:
+      context: ./server
+      dockerfile: Dockerfile.server
+    healthcheck:
+      test: ['CMD-SHELL', crul https:/localhost:8501 -brief || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - '8501:8501'
+    networks:
+      SmartTraid:
+        ipv4_address: 172.18.0.3
+
+  
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  SmartTraid:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16 
+  
