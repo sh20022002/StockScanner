@@ -30,13 +30,21 @@ def client_page():
     stock_ticker = symbols[sindex]
     st.sidebar.write(f"Stock Ticker: {stock_ticker}")
 
-    inicaitors = st.sidebar.multiselect('Inicaitors', ['Volume', 'SMA20', 'SMA50', 'SMA100', 'SMA150', 'EMA', 'ADX', 'RSI', 'MCAD'])
-    interval = st.sidebar.radio('Interval', ['Day', 'Hour'])
-    days = st.sidebar.slider('Days', 1, 1000, 100)
-    if interval == 'Day':
-        interval = '1d'
-    else:
-        interval = '1h'
+    inicaitors = st.sidebar.multiselect('Inicaitors', ['Volume', 'SMA20', 'SMA50', 'SMA100', 'SMA150','SMA200', 'EMA20', 'ADX', 'RSI', 'MCAD'])
+    
+    bar = 50
+    if 'SMA100' in inicaitors:
+        bar = 100
+    elif 'SMA150' in inicaitors:
+        bar = 150
+    elif 'SMA200' in inicaitors:
+        bar = 200
+    intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
+    interval = st.sidebar.selectbox('Interval', intervals, index=8)
+    min_bar = 1
+    if intervals.index(interval) < 7:
+        min_bar = 30
+    days = st.sidebar.slider('Days', min_bar, 1000, bar)
     df = scraping.get_stock_data(stock_ticker,DAYS=days , interval=interval)
     if df is None:
         st.error(f"No data available for {stock_ticker} at {interval} interval.")
@@ -47,7 +55,7 @@ def client_page():
         st.error(f"Required columns are missing in the data for {stock_ticker}.")
         return
     
-    st.plotly_chart(plots.plot_stock(df, stock_ticker, inicaitors, show='all', interval=interval))
+    st.plotly_chart(plots.plot_stock_(df, stock_ticker, inicaitors, show='all', interval=interval))
 
     compeny = database.get_compeny(stock_ticker)
     if compeny:

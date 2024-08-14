@@ -48,10 +48,17 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['SMA50'] = ta.sma(df['Close'], length=50)
     df['SMA100'] = ta.sma(df['Close'], length=100)
     df['SMA150'] = ta.sma(df['Close'], length=150)
+    df['SMA200'] = ta.sma(df['Close'], length=200)
+    df['EMA20'] = ta.ema(df['Close'], length=20)
     df['RSI'] = ta.ema(df['Close'], length=20)
-    df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)['ADX_14']
+    if interval != '1m':
+        df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)['ADX_14']
+    
     df['RSI'] = ta.rsi(df['Close'], length=14)
-    df['MCAD'] = ta.macd(df['Close'])['MACD_12_26_9']
+    macd = ta.macd(df['Close'])
+    df['MACD'] = macd['MACD_12_26_9']
+    df['MACD_signal'] = macd['MACDs_12_26_9']
+    df['MACD_hist'] = macd['MACDh_12_26_9']
 
     return df
 

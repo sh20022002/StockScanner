@@ -17,14 +17,15 @@ db_password = os.getenv('DB_PASSWORD', 'te13@t$3t')
 db_name = os.getenv('DB_NAME', 'SmartTraid')
 
 # parse the URI
+db_user = quote_plus(db_user)
 db_password = quote_plus(db_password)
 db_name = quote_plus(db_name)
 
 # Create the MongoDB client
-mongo_uri = f"mongodb://{db_user}:{db_password}@{db_host}:{db_port}/?authSource=admin"
+mongo_uri = f"mongodb://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?authSource=admin"
 client = MongoClient(mongo_uri)
 
-mydb = client[db_name]
+mydb = client.SmartTraid
 compenies = mydb['stocks']
 models = mydb['models']
 

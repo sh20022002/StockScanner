@@ -9,9 +9,6 @@ def run_app():
 def run_main():
     subprocess.run(["python", "main.py"])
 
-if 'page' not in st.session_state:
-    st.session_state['page'] = 'app'
-
 if __name__ == "__main__":
     with ThreadPoolExecutor(max_workers=2) as executor:
         executor.submit(run_app)
