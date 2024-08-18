@@ -12,18 +12,18 @@ from urllib.parse import quote_plus
 # Fetch environment variables
 db_host = os.getenv('DB_HOST', 'db')
 db_port = int(os.getenv('DB_PORT', 27017))
-db_user = os.getenv('DB_USER', 'root')
-db_password = os.getenv('DB_PASSWORD', 'te13@t$3t')
-db_name = os.getenv('DB_NAME', 'SmartTraid')
+# db_user = os.getenv('DB_USER', 'root')
+# db_password = os.getenv('DB_PASSWORD', 'te13@t$3t')
+# db_name = os.getenv('DB_NAME', 'SmartTraid')
 
 # parse the URI
-db_user = quote_plus(db_user)
-db_password = quote_plus(db_password)
-db_name = quote_plus(db_name)
+# db_user = quote_plus(db_user)
+# db_password = quote_plus(db_password)
+# db_name = quote_plus(db_name)
 
 # Create the MongoDB client
-mongo_uri = f"mongodb://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?authSource=admin"
-client = MongoClient(mongo_uri)
+# mongo_uri = f"mongodb://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?authSource=admin"
+client = MongoClient(db_host, db_port)
 
 mydb = client.SmartTraid
 compenies = mydb['stocks']

@@ -4,9 +4,6 @@ services:
   db:
     image: mongo:4.4
     container_name: db
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: root
     volumes:
       - mongodb_data:/data/db
     networks:

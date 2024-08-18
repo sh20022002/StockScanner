@@ -52,14 +52,16 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['EMA20'] = ta.ema(df['Close'], length=20)
     df['RSI'] = ta.ema(df['Close'], length=20)
     if interval != '1m':
+        df['Datetime'] = pd.to_datetime(df['Datetime'])
         df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)['ADX_14']
+        macd = ta.macd(df['Close'])
+        df['MACD'] = macd['MACD_12_26_9']
+        df['MACD_signal'] = macd['MACDs_12_26_9']
+        df['MACD_hist'] = macd['MACDh_12_26_9']
+
     
     df['RSI'] = ta.rsi(df['Close'], length=14)
-    macd = ta.macd(df['Close'])
-    df['MACD'] = macd['MACD_12_26_9']
-    df['MACD_signal'] = macd['MACDs_12_26_9']
-    df['MACD_hist'] = macd['MACDh_12_26_9']
-
+    
     return df
 
 def get_tickers():
