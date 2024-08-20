@@ -1,4 +1,4 @@
-import scraping, database, compeny
+import scraping, database
 import time
 
 import strategy

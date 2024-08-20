@@ -33,17 +33,35 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     Returns:
     - DataFrame: A pandas DataFrame containing the historical stock data.
     '''
+    if interval == '1m':
+        DAYS = 7
     end_date = get_exchange_time()
 
     start_date = end_date - timedelta(DAYS)  # days before the end date
     stock_ticker = yf.Ticker(stock)
-    df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
-    if interval == '1h':
-        df = df.reset_index('Datetime')
-    else:
-        df.reset_index(inplace=True)
-        df.rename(columns={'Date': 'Datetime'}, inplace=True)
+    data = stock_ticker.recommendations
+    summery = stock_ticker.info['longBusinessSummary']
+
+    info = stock_ticker.info
+
+    max_key = stock_ticker.info['recommendationKey']
+    divid = 'No Dividend'
+    last_dividend_date_timestamp = info.get('lastDividendDate')
+    if last_dividend_date_timestamp:
+        last_dividend_date = datetime.fromtimestamp(last_dividend_date_timestamp)
+        divid = f"{last_dividend_date.strftime('%Y-%m-%d')} : {info.get('lastDividendValue')} $"
         
+
+    
+        
+    df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
+    
+    if df.index.name == 'Date':
+        df = df.rename_axis('Datetime')
+        df.index = pd.to_datetime(df.index)
+
+    df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
+    
     df['SMA20'] = ta.sma(df['Close'], length=20)
     df['SMA50'] = ta.sma(df['Close'], length=50)
     df['SMA100'] = ta.sma(df['Close'], length=100)
@@ -51,18 +69,13 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['SMA200'] = ta.sma(df['Close'], length=200)
     df['EMA20'] = ta.ema(df['Close'], length=20)
     df['RSI'] = ta.ema(df['Close'], length=20)
-    if interval != '1m':
-        df['Datetime'] = pd.to_datetime(df['Datetime'])
-        df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)['ADX_14']
-        macd = ta.macd(df['Close'])
-        df['MACD'] = macd['MACD_12_26_9']
-        df['MACD_signal'] = macd['MACDs_12_26_9']
-        df['MACD_hist'] = macd['MACDh_12_26_9']
-
+    
+    # df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['MCAD'] = ta.macd(df['Close'].values)
     
     df['RSI'] = ta.rsi(df['Close'], length=14)
     
-    return df
+    return df, max_key, summery, divid, info
 
 def get_tickers():
     '''

@@ -1,6 +1,7 @@
 import streamlit as st
 import scraping, plots
 import database
+from datetime import datetime
 
 if 'page' not in st.session_state:
         st.session_state['page'] = 'app'
@@ -30,27 +31,35 @@ def client_page():
     stock_ticker = symbols[sindex]
     st.sidebar.write(f"Stock Ticker: {stock_ticker}")
 
-    un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'MACD', 'RSI', 'ADX']
-    bar = 50
-    if 'SMA100' in un_inicaitors:
-        bar = 100
-    elif 'SMA150' in un_inicaitors:
-        bar = 150
-    elif 'SMA200' in un_inicaitors:
-        bar = 200
-    intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
-    interval = st.sidebar.selectbox('Interval', intervals, index=8)
+    un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'MACD', 'RSI']
+    # bar = 50
+    # if 'SMA100' in un_inicaitors:
+    #     bar = 100
+    # elif 'SMA150' in un_inicaitors:
+    #     bar = 150
+    # elif 'SMA200' in un_inicaitors:
+    #     bar = 200
+    intervals = ['1m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
+    interval = st.sidebar.selectbox('Interval', intervals, index=2)
 
     
-    if interval == '1m':
-        un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'RSI', 'ADX']
+    # if interval == '1m':
+        # un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'RSI', 'ADX']
     inicaitors= st.sidebar.multiselect('Inicaitors', un_inicaitors)
-
+    max_bar = 1000
     min_bar = 1
-    if intervals.index(interval) < 7:
-        min_bar = 30
-    days = st.sidebar.slider('Days', min_bar, 1000, bar)
-    df = scraping.get_stock_data(stock_ticker,DAYS=days , interval=interval)
+   
+        
+    if interval == '1m':
+        max_bar = 1
+        min_bar = 1
+    elif interval == '1h':
+        max_bar = 7
+        min_bar = 1
+    median_bar = round((min_bar + max_bar) // 2)
+    days = st.sidebar.slider('Days', min_bar, max_bar, median_bar)
+    df, max_key, summery, divid, info = scraping.get_stock_data(stock_ticker,DAYS=days , interval=interval)
+    # st.write(df.head())
     if df is None:
         st.error(f"No data available for {stock_ticker} at {interval} interval.")
         return
@@ -62,16 +71,32 @@ def client_page():
     
     st.plotly_chart(plots.plot_stock(df, stock_ticker, inicaitors, show='all', interval=interval))
 
-    compeny = database.get_compeny(stock_ticker)
-    if compeny:
-        st.write(f"Name: {compeny.compeny_name}")
-        st.plotly_chart(compeny.show(interval, inicaitors))
-        st.write(f"Location: {compeny.Location}")
-        st.write(f"Founded: {compeny.Founded}")
-        st.write(f"CIK: {compeny.CIK}")
-        st.write(f"GICS Sector: {compeny.GICS_Sector}")
-        st.write(f"GICS Sub-Industry: {compeny.GICS_Sub_Industry}")
-        st.write(f"Price: {scraping.current_stock_price(stock_ticker)}")
+
+    
+    st.write(f"Summary: {summery}")
+    st.write(f"\n Recommendation: {max_key}     Dividend: {divid}")
+    text = ''
+    n = 0
+    for key, value in info.items():
+        
+        if n == 2:
+            st.text(text)
+            text = ''
+            n = 0
+        elif n == 1:
+            if len(text) < 45:
+                f = 45 - len(text)
+                text += ' '*f
+                
+        
+        if key not in ['longBusinessSummary', 'recommendationKey', 'lastDividendDate', 'lastDividendValue', 'trailingPegRatio', 'financialCurrency', 'uuid', 'timeZoneShortName', 'timeZoneFullName', 'firstTradeDateEpochUtc',  'lastDividendDate', 'lastDividendValue', 'lastSplitDate', 'lastSplitFactor', 'irWebsite', 'compensationAsOfEpochDate', 'governanceEpochDate', 'companyOfficer', 'longBusinessSummary', 'sectorDisp', 'sectorKey', 'industryDisp', 'industryKey', 'address1', 'companyOfficers', 'currency', 'exchange', 'quoteType', 'symbol', 'underlyingSymbol', 'shortName', 'longNam', 'messageBoardId', 'gmtOffSetMilliseconds']:
+            if key in ['mostRecentQuarter', 'nextFiscalYearEnd', 'lastFiscalYearEnd']:
+                t = datetime.fromtimestamp(value)
+                text += f"{key}: {value}    "
+            else:
+                text += f"{key}: {value}    "
+
+            n += 1
 
 
 def go_to_login():
