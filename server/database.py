@@ -48,10 +48,10 @@ def save_compeny(company):
                           'Gics_Sub_Industry': company.GICS_Sub_Industry,
                           'CIK': company.CIK,
                           'Founded': company.Founded,
-                          'Location': company.Location,
-                          'price': company.price,
-                          'sentiment': company.sentiment,
-                          'summary': company.summery,})
+                          'Location': company.Location})
+                        #   'price': company.price,
+                        #   'sentiment': company.sentiment,
+                        #   'summary': company.summery,})
                         #   'model_1h': company.hourly,
                         #   'model_1d': company.daily,
                         #   'last_update': company.last_update})

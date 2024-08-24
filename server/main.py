@@ -28,6 +28,7 @@ def main():
 
     # initialize the database
 
+    d = []
     initialize()
 
     fivem = 5 * 60
@@ -36,7 +37,7 @@ def main():
 
     while scraping.is_nyse_open():
 
-        chack_open_positions()
+        # chack_open_positions()
 
         recmondation.reset()
 
@@ -77,16 +78,16 @@ def initialize():
 
     for i in range(len(sp500_compenies[0])):
 
-        compenies.append(sp500_compenies[1][i])
+        # compenies.append(sp500_compenies[1][i])
 
-        compeny1 = compeny.Compeny(compeny_name=sp500_compenies[i][1], symbol=sp500_compenies[i][0],
+        compeny1 = Compeny(compeny_name=sp500_compenies[i][1], symbol=sp500_compenies[i][0],
                                     GICS_Sector=sp500_compenies[3][i],
                                     GICS_Sub_Industry=sp500_compenies[4][i],
                                     Location=sp500_compenies[5][i],
                                     CIK=sp500_compenies[6][i],
                                     Founded=sp500_compenies[7][i])
         
-
+        # d.append(compeny1)
         database.save_compeny(compeny1)
 
 if __name__ == "__main__":

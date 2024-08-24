@@ -133,7 +133,15 @@ def is_nyse_open():
 
     Returns:
     - bool: True if the NYSE is open, False otherwise.
+
     '''
+    time = get_exchange_time()
+    if 0 <= time.weekday() <= 4:
+        if time.time() >= time(9, 30) and time.time() <= time(16, 0):
+            return True
+    else:
+        return False
+        
     def next_weekday(d, weekday):
         """Return the next date with the given weekday (0=Monday, 6=Sunday)."""
         days_ahead = weekday - d.weekday()
