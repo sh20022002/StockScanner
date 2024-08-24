@@ -135,13 +135,66 @@ def is_nyse_open():
     - bool: True if the NYSE is open, False otherwise.
 
     '''
-    time = get_exchange_time()
-    if 0 <= time.weekday() <= 4:
-        if time.time() >= time(9, 30) and time.time() <= time(16, 0):
-            return True
-    else:
-        return False
-        
+    current_time = get_exchange_time()
+    nyse_open_time = time(9, 30)
+    nyse_close_time = time(16, 0)
+
+    nyse_holidays = [
+        datetime(current_time.year, 1, 1),  # New Year's Day
+        next_weekday(datetime(current_time.year, 1, 15), 0),  # Martin Luther King Jr. Day (3rd Monday in January)
+        next_weekday(datetime(current_time.year, 2, 15), 0),  # Presidents' Day (3rd Monday in February)
+        easter_monday(current_time.year) - timedelta(days=3),  # Good Friday (date varies)
+        next_weekday(datetime(current_time.year, 5, 25), 0),  # Memorial Day (last Monday in May)
+        datetime(current_time.year, 7, 4),  # Independence Day
+        next_weekday(datetime(current_time.year, 9, 1), 0),  # Labor Day (1st Monday in September)
+        next_weekday(datetime(current_time.year, 11, 22), 3),  # Thanksgiving Day (4th Thursday in November)
+        datetime(current_time.year, 12, 25)  # Christmas Day
+    ]
+
+    special_dates = [
+        datetime(current_time.year, 12, 24),
+        datetime(current_time.year, 12, 25),
+        datetime(current_time.year, 2, 19)
+    ]
+
+    all_holidays = nyse_holidays + special_dates
+
+    if 0 <= current_time.weekday() <= 4:  # Check if the current date is a weekend
+        if any(holiday.date() != current_time.date() for holiday in all_holidays):  # Check if the current date is a holiday
+            if nyse_open_time <= current_time.time() <= nyse_close_time:  # Check if the current time is within trading hours
+                return True
+    
+    
+    return False
+
+def next_weekday(d, weekday):
+    """Return the next date with the given weekday (0=Monday, 6=Sunday)."""
+    days_ahead = weekday - d.weekday()
+    if days_ahead <= 0:  # Target day already happened this week
+        days_ahead += 7
+    return d + timedelta(days_ahead)
+
+def easter_monday(year):
+    """Returns Easter Monday for a given year."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    easter_sunday = datetime(year, month, day)
+    return easter_sunday + timedelta(days=1)
+
+
+
     def next_weekday(d, weekday):
         """Return the next date with the given weekday (0=Monday, 6=Sunday)."""
         days_ahead = weekday - d.weekday()
@@ -168,38 +221,15 @@ def is_nyse_open():
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-    current_time = get_exchange_time()
-    nyse_open_time = time(9, 30)
-    nyse_close_time = time(16, 0)
-
-    nyse_holidays = [
-        datetime(current_time.year, 1, 1),  # New Year's Day
-        next_weekday(datetime(current_time.year, 1, 15), 0),  # Martin Luther King Jr. Day (3rd Monday in January)
-        next_weekday(datetime(current_time.year, 2, 15), 0),  # Presidents' Day (3rd Monday in February)
-        easter_monday(current_time.year) - timedelta(days=3),  # Good Friday (date varies)
-        next_weekday(datetime(current_time.year, 5, 25), 0),  # Memorial Day (last Monday in May)
-        datetime(current_time.year, 7, 4),  # Independence Day
-        next_weekday(datetime(current_time.year, 9, 1), 0),  # Labor Day (1st Monday in September)
-        next_weekday(datetime(current_time.year, 11, 22), 3),  # Thanksgiving Day (4th Thursday in November)
-        datetime(current_time.year, 12, 25)  # Christmas Day
-    ]
-
-    special_dates = [
-        datetime(current_time.year, 12, 24),
-        datetime(current_time.year, 12, 25),
-        datetime(current_time.year, 2, 19)
-    ]
-
-    all_holidays = nyse_holidays + special_dates
-
-    if current_time.weekday() >= 5:  # Check if the current date is a weekend
-        return False
-
-    if any(holiday.date() == current_time.date() for holiday in all_holidays):  # Check if the current date is a holiday
-        return False
-
-    if nyse_open_time <= current_time.time() <= nyse_close_time:  # Check if the current time is within trading hours
-        return True
-    else:
-        return False
-
+    # if __name__ == '__main__':
+    #     # print(is_nyse_open())
+    #     # print(get_exchange_time())
+    #     # print(get_exchange_rate('USD', 'EUR'))
+    #     # print(get_tickers())
+    #     # print(get_stock_data('AAPL'))
+    #     # print(current_stock_price('AAPL'))
+    #     # print(get_stocks())
+    #     if is_nyse_open():
+    #         print('The NYSE is currently open.')
+    #     else:
+    #         print('The NYSE is currently closed.')
