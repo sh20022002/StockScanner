@@ -11,5 +11,5 @@ def run_main():
 
 if __name__ == "__main__":
     with ThreadPoolExecutor(max_workers=2) as executor:
-        # executor.submit(run_app)
+        executor.submit(run_app)
         executor.submit(run_main)

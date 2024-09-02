@@ -1,5 +1,7 @@
 import scraping, database
 import time
+from datetime import datetime
+
 
 import strategy
 class Compeny:
@@ -12,46 +14,48 @@ class Compeny:
         self.CIK = CIK
         self.Founded = Founded
         
+def run_trading_while_market_is_open(fivem=300):
+    """
+    Runs the trading strategy while the NYSE is open.
 
-def main():
+    Args:
+        strategy (Strategy): The strategy object to use for trading.
+        signal_stack (SignalStack): The stack to store buy/sell signals.
+        recmondation (object): The recommendation object with buy/sell lists.
+        fivem (int): Time in seconds to wait between checks (default is 300 seconds, or 5 minutes).
 
     """
-
-    The main function of the trade bot.
-
-
-    This function initializes the database, checks for open positions, and looks for trades.
-
-    It runs in a loop while the NYSE is open, with a delay of one hour between iterations.
-
-    """
-
-    # initialize the database
-
-    d = []
     initialize()
 
-    fivem = 5 * 60
-
-    recmondation =  strategy.RecomendAction
-
     while scraping.is_nyse_open():
+        # Reset recommendations and stack
+        signal_stack = SignalStack()
 
-        # chack_open_positions()
-
-        recmondation.reset()
-
-        strategy.adx_rsi()
-
-        for symbol in recmondation.buy:
-
-            strategy.anlayze(symbol)
-
-        for symbol in recmondation.sell:
-
-            strategy.anlayze(symbol)
+        # Get the best strategy and its parameters
         
+        for company in database.get_compenies():
+            df = scraping.get_stock_data(company["symbol"], interval="1d", period="1y")
+
+            best_strategy_name = strategy.simulate_multiple_strategies(df, company["symbol"], cash=1000, commission=0.1)
+
+            buy_signal, sell_signal = get_current_signals(symbol=company["symbol"], strategy_name=best_strategy_name, signal_stack=signal_stack, **best_strategy_params)
+
+        print(f"Buy Signal: {buy_signal}, Sell Signal: {sell_signal}")
+        print("Current Signal Stack:")
+        print(signal_stack)
+
+        signal_stack.remove_irrelevant_signals()
+
+        # Check open positions or perform other account maintenance
+        # check_open_positions()  # Implement this function as needed
+
+        # Analyze and find the best strategy for each company
+          # Assuming this fetches a list of company symbols
+
+        # Wait before checking again
         time.sleep(fivem)
+
+
 
 def initialize():
 
@@ -91,4 +95,4 @@ def initialize():
         database.save_compeny(compeny1)
 
 if __name__ == "__main__":
-    main()
+    run_trading_while_market_is_open()

@@ -1,3 +1,2 @@
-from datetime import date, timedelta
+import unittest
 
-print(date.today() - timedelta(days=365*18))

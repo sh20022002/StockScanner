@@ -43,15 +43,15 @@ def client_page():
     interval = st.sidebar.selectbox('Interval', intervals, index=2)
 
     
-    # if interval == '1m':
-        # un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'RSI', 'ADX']
+    if interval != '1m' or interval != '1h':
+        un_inicaitors = ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20', 'RSI']
     inicaitors= st.sidebar.multiselect('Inicaitors', un_inicaitors)
     max_bar = 1000
     min_bar = 1
    
         
     if interval == '1m':
-        max_bar = 1
+        max_bar = 2
         min_bar = 1
     elif interval == '1h':
         max_bar = 7
