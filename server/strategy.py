@@ -95,7 +95,7 @@ class SignalStack:
         return "\n".join(str(signal) for signal in self.signals)
 
 
-def backtest_strategy(df, strategy_func, initial_cash=10000, commission=0):
+def backtest_strategy(df, strategy_func, initial_cash=10000, commission=0.02):
     """
     Backtests a trading strategy on historical data.
     
@@ -187,6 +187,22 @@ class Strategy:
         
         Returns:
             function: The strategy function.
+        """
+        pass
+    def get_strategy_resoult(self):
+        """
+        Gets the strategy resoult.
+        
+        Returns:
+            buy_signals, sell_signals: The buy and sell signals.    
+        """
+        pass
+    def get_stock_volatility(self):
+        """
+        Gets the stock volatility.
+        
+        Returns:
+            float: The stock volatility.
         """
         pass
 
