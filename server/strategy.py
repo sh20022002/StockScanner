@@ -188,15 +188,13 @@ class Strategy:
         Returns:
             function: The strategy function.
         """
-        pass
-    def get_strategy_resoult(self):
-        """
-        Gets the strategy resoult.
-        
-        Returns:
-            buy_signals, sell_signals: The buy and sell signals.    
-        """
-        pass
+        for func in [self.macd, self.rsi, self.ma, self.bollinger_bands]:
+            try:
+                df = scraping.get_stock_data(stock, DAYS=1000, interval='1h')
+                res = func(df)
+            except Exception as e:
+                print(f"Error in {func.__name__}: {e}")
+
     def get_stock_volatility(self):
         """
         Gets the stock volatility.
