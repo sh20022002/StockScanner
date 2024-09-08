@@ -71,11 +71,17 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['RSI'] = ta.ema(df['Close'], length=20)
     
     # df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df['MCAD'] = ta.macd(df['Close'].values)
-    
     df['RSI'] = ta.rsi(df['Close'], length=14)
+
+    macd = ta.macd(df['Close'])
+    df['MACD'] = macd['MACD_12_26_9']
+    df['MACD_Signal'] = macd['MACDs_12_26_9']
+    df['MACD_Hist'] = macd['MACDh_12_26_9']
+
+    print(df.tail())
     
-    return df, max_key, summery, divid, info
+    # print(df.tail())
+    # return df , max_key, summery, divid, info
 
 def get_tickers():
     '''
@@ -221,12 +227,12 @@ def easter_monday(year):
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-    # if __name__ == '__main__':
+if __name__ == '__main__':
     #     # print(is_nyse_open())
     #     # print(get_exchange_time())
     #     # print(get_exchange_rate('USD', 'EUR'))
     #     # print(get_tickers())
-    #     # print(get_stock_data('AAPL'))
+    get_stock_data('AAPL', interval='1d', DAYS=365)
     #     # print(current_stock_price('AAPL'))
     #     # print(get_stocks())
     #     if is_nyse_open():

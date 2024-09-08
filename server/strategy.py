@@ -240,7 +240,7 @@ class Strategy:
         sell_signals = (df['RSI'] > 70) & (df['RSI'].shift(1) <= 70)
         return buy_signals, sell_signals
 
-    def ma(self, df, short_window=40, long_window=100):
+    def ma(self, df, short_window=20, long_window=150):
         """
         Calculates the Moving Average (MA) signals.
         
@@ -394,14 +394,14 @@ def backtest_strategy(df, strategy_func, transaction_cost=0.002, tax_on_profit=0
     return performance, risk_metrics
 
 
-# Example usage
-param_grid = {
-    'short_window': [10, 50],
-    'long_window': [50, 200],
-    'stop_loss_pct': [0.01, 0.1],
-    'take_profit_pct': [0.01, 0.1]
-}
+# # Example usage
+# param_grid = {
+#     'short_window': [10, 50],
+#     'long_window': [50, 200],
+#     'stop_loss_pct': [0.01, 0.1],
+#     'take_profit_pct': [0.01, 0.1]
 
-df = pd.read_csv('your_data.csv')  # Load your data here
-best_params = genetic_algorithm(df, Strategy().ma, param_grid)
-print("Best Parameters:", best_params)
+if __name__ == '__main__':
+    df = scraping.get_stock_data('AAPL', DAYS=1000) # Load your data here
+    buy_signals, sell_signals = Strategy('MA', 100, 50, 0.1).macd(df)
+    print(buy_signals, sell_signals)
