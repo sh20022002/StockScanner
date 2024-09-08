@@ -33,8 +33,13 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     Returns:
     - DataFrame: A pandas DataFrame containing the historical stock data.
     '''
-    if interval == '1m':
+    if interval == '1m' and DAYS > 7:
         DAYS = 7
+    elif interval == '25' and DAYS > 60:
+        DAYS = 60
+    elif interval == '1h' and DAYS > 730:
+        DAYS = 730
+
     end_date = get_exchange_time()
 
     start_date = end_date - timedelta(DAYS)  # days before the end date
@@ -70,7 +75,11 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['EMA20'] = ta.ema(df['Close'], length=20)
     df['RSI'] = ta.ema(df['Close'], length=20)
     
-    # df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['ADX'] = adx['ADX_14']
+    # df['DMP'] = adx['DMP_14']
+    # df['DMN'] = adx['DMN_14']
+
     df['RSI'] = ta.rsi(df['Close'], length=14)
 
     macd = ta.macd(df['Close'])
@@ -78,9 +87,9 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['MACD_Signal'] = macd['MACDs_12_26_9']
     df['MACD_Hist'] = macd['MACDh_12_26_9']
 
-    print(df.tail())
+    return (df.tail())
     
-    # print(df.tail())
+    
     # return df , max_key, summery, divid, info
 
 def get_tickers():
@@ -227,15 +236,16 @@ def easter_monday(year):
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-if __name__ == '__main__':
-    #     # print(is_nyse_open())
-    #     # print(get_exchange_time())
-    #     # print(get_exchange_rate('USD', 'EUR'))
-    #     # print(get_tickers())
-    get_stock_data('AAPL', interval='1d', DAYS=365)
-    #     # print(current_stock_price('AAPL'))
-    #     # print(get_stocks())
-    #     if is_nyse_open():
-    #         print('The NYSE is currently open.')
-    #     else:
-    #         print('The NYSE is currently closed.')
+# if __name__ == '__main__':
+    # print(is_nyse_open())
+    # print(get_exchange_time())
+    # print(get_exchange_rate('USD', 'EUR'))
+    # print(get_tickers())
+
+    # print(get_stock_data('NVDA', interval='1m', DAYS=2000))
+    # print(current_stock_price('AAPL'))
+    # print(get_stocks())
+    # if is_nyse_open():
+        # print('The NYSE is currently open.')
+    # else:
+        # print('The NYSE is currently closed.')

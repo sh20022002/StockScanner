@@ -51,9 +51,5 @@ def plot_stock(df, stock, columns, show='no', interval='1h'):
                 dict(bounds=["sat", "mon"]),  # hide weekends
                 dict(bounds=[16, 9.5], pattern="hour")  # hide non-trading hours (16:00 to 09:30)
             ])
-    fig.update_layout(title=f"{stock} Stock Price and MACD",  #????
-        yaxis_title="Price",
-        xaxis_title="Date",
-        height=800)
     
     return fig

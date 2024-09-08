@@ -402,6 +402,6 @@ def backtest_strategy(df, strategy_func, transaction_cost=0.002, tax_on_profit=0
 #     'take_profit_pct': [0.01, 0.1]
 
 if __name__ == '__main__':
-    df = scraping.get_stock_data('AAPL', DAYS=1000) # Load your data here
-    buy_signals, sell_signals = Strategy('MA', 100, 50, 0.1).macd(df)
+    df = scraping.get_stock_data('AAPL', DAYS=700) # Load your data here
+    buy_signals, sell_signals = Strategy('MA', 100, 50, 0.1).ma(df)
     print(buy_signals, sell_signals)
