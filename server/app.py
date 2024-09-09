@@ -58,7 +58,13 @@ def client_page():
         min_bar = 1
     median_bar = round((min_bar + max_bar) // 2)
     days = st.sidebar.slider('Days', min_bar, max_bar, median_bar)
-    df, max_key, summery, divid, info = scraping.get_stock_data(stock_ticker,DAYS=days , interval=interval)
+    df, max_key, summery, divid, info = scraping.get_stock_data(stock_ticker,DAYS=days , interval=interval, return_flags={
+                                                                'DF': True,
+                                                                'MAX_KEY': True,
+                                                                'SUMMERY': True,
+                                                                'DIVD': True,
+                                                                'INFO': True
+                                                                } )
     # st.write(df.head())
     if df is None:
         st.error(f"No data available for {stock_ticker} at {interval} interval.")

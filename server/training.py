@@ -48,6 +48,7 @@ def train_hmm_to_date(stock, last_update, interval):
     difference = today - last_update
     days = difference.days
     df = get_stock_data(stock, DAYS=days, interval=interval)
+    df = df['DF']
     returns = calculate_hourly_returns(df['Close'])
     
     model = database.get_hmm_model(stock, interval)
@@ -72,6 +73,7 @@ def pipline(stock, interval):
         tuple: A tuple containing the training and testing data.
     """
     df = get_stock_data(stock, interval=interval, DAYS=365)
+    df = df['DF']
     df['Future_Close'] = df['Close'].shift(-1)
     df = df.dropna()
     x = df[['Open', 'High', 'Low', 'Close', 'Volume', 'SMA150', 'EMA', 'ADX', 'KLASS_VOL', 'RSI']]

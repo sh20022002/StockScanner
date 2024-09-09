@@ -20,6 +20,7 @@ def stock_and_tecnical(stock, interval='1h'):
     - df (pandas.DataFrame): The dataframe containing stock data with added technical indicators.
     '''
     df = scraping.get_stock_data(stock, interval=interval, DAYS=365)
+    df = df['DF']
     return df
 
 

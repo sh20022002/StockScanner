@@ -61,8 +61,8 @@ def get_stock_data(stock, return_flags={
         DAYS = 7
     elif interval == '25' and DAYS > 60:
         DAYS = 60
-    elif interval == '1h' and DAYS > 730:
-        DAYS = 730
+    elif interval == '1h' and DAYS > 729:
+        DAYS = 729
 
     end_date = get_exchange_time()
 
@@ -89,7 +89,8 @@ def get_stock_data(stock, return_flags={
         df = df.rename_axis('Datetime')
         df.index = pd.to_datetime(df.index)
 
-    df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
+    if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
+        df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
     
     df['SMA20'] = ta.sma(df['Close'], length=20)
     df['SMA50'] = ta.sma(df['Close'], length=50)
@@ -98,18 +99,31 @@ def get_stock_data(stock, return_flags={
     df['SMA200'] = ta.sma(df['Close'], length=200)
     df['EMA20'] = ta.ema(df['Close'], length=20)
     df['RSI'] = ta.ema(df['Close'], length=20)
-    
-    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df['ADX'] = adx['ADX_14']
+
+    if interval != '1h':
+        adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+        df['ADX'] = adx['ADX_14']
     # df['DMP'] = adx['DMP_14']
     # df['DMN'] = adx['DMN_14']
 
     df['RSI'] = ta.rsi(df['Close'], length=14)
 
-    macd = ta.macd(df['Close'])
-    df['MACD'] = macd['MACD_12_26_9']
-    df['MACD_Signal'] = macd['MACDs_12_26_9']
-    df['MACD_Hist'] = macd['MACDh_12_26_9']
+    if interval not in ['1h' ,'1wk', '1mo', '3mo']:
+        KLASS_VOL = ta.kvo(df['High'], df['Low'], df['Close'], df['Volume'], fast=34, slow=55, signal=13)
+        if KLASS_VOL is not None:
+            df['KLASS_VOL'] = KLASS_VOL['KVO_34_55_13']
+            df['KLASS_VOL_Signal'] = KLASS_VOL['KVOs_34_55_13']
+        else:
+            print(f"Warning: KVO calculation failed for  with interval {interval}")
+    
+    if interval not in ['1h', '1mo', '3mo']:
+        macd = ta.macd(df['Close'])
+        if macd is not None:
+            df['MACD'] = macd['MACD_12_26_9']
+            df['MACD_Signal'] = macd['MACDs_12_26_9']
+            df['MACD_Hist'] = macd['MACDh_12_26_9']
+        else:
+            print(f"Warning: MACD calculation failed for with interval {interval}")
 
     # return (info)
     
@@ -275,10 +289,10 @@ if __name__ == '__main__':
     # print(is_nyse_open())
     # print(get_exchange_time())
     # print(get_exchange_rate('USD', 'EUR'))
-    # print(get_tickers())
-
-    i = get_stock_data('NVDA', interval='1m', DAYS=2000)
-    print(i['DF'].head())
+    # # print(get_tickers())
+    for interval in ['1m', '1h', '1d', '5d', '1wk', '1mo', '3mo']:
+        i = get_stock_data('NVDA', interval=interval, DAYS=2000)
+        print(interval, i['DF'].head())
     # print(current_stock_price('AAPL'))
     # print(get_stocks())
     # if is_nyse_open():
