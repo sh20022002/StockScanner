@@ -21,8 +21,27 @@ def current_stock_price(symbol):
     df = yf.Ticker(symbol).history(period='1h')
     return df['Close'].iloc[-1]
 
-def get_stock_data(stock, DAYS=365, interval='1h'):
-    '''
+def get_stock_data(stock, return_flags={
+                                        'DF': True,
+                                        'MAX_KEY': False,
+                                        'SUMMERY': False,
+                                        'DIVD': False,
+                                        'INFO': False
+                                        }, DAYS=365, interval='1h'):
+
+    '''- return_flags (dict): A dictionary specifying which return values to include.
+        - DF (bool): If True, include the DataFrame of historical stock data. Default is False.
+        - MAX_KEY (bool): If True, include the maximum recommendation key. Default is False.
+        - SUMMERY (bool): If True, include the long business summary. Default is False.
+        - DIVD (bool): If True, include the last dividend information. Default is False.
+        - INFO (bool): If True, include the stock information. Default is False.
+    - dict: A dictionary containing the requested return values.
+        - DF (DataFrame): A pandas DataFrame containing the historical stock data.
+        - MAX_KEY (str): The maximum recommendation key.
+        - SUMMERY (str): The long business summary.
+        - DIVD (str): The last dividend information.
+        - INFO (dict): The stock information.
+    
     Get historical stock data for a given stock symbol.
 
     Parameters:
@@ -31,7 +50,12 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     - interval (str): Valid intervals: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo]
 
     Returns:
-    - DataFrame: A pandas DataFrame containing the historical stock data.
+        dict: A dictionary containing the requested return values.
+            - DF (DataFrame): A pandas DataFrame containing the historical stock data.
+            - MAX_KEY (str): The maximum recommendation key.
+            - SUMMERY (str): The long business summary.
+            - DIVD (str): The last dividend information.
+            - INFO (dict): The stock information.
     '''
     if interval == '1m' and DAYS > 7:
         DAYS = 7
@@ -87,10 +111,21 @@ def get_stock_data(stock, DAYS=365, interval='1h'):
     df['MACD_Signal'] = macd['MACDs_12_26_9']
     df['MACD_Hist'] = macd['MACDh_12_26_9']
 
-    return (df.tail())
+    # return (info)
     
-    
-    # return df , max_key, summery, divid, info
+    return_values = {}
+    if return_flags.get('DF', False):
+        return_values['DF'] = df
+    if return_flags.get('MAX_KEY', False):
+        return_values['MAX_KEY'] = max_key  # Assuming max_key is defined elsewhere
+    if return_flags.get('SUMMERY', False):
+        return_values['SUMMERY'] = summery  # Assuming summery is defined elsewhere
+    if return_flags.get('DIVD', False):
+        return_values['DIVD'] = divd  # Assuming divd is defined elsewhere
+    if return_flags.get('INFO', False):
+        return_values['INFO'] = info  # Assuming info is defined elsewhere
+
+    return return_values
 
 def get_tickers():
     '''
@@ -236,13 +271,14 @@ def easter_monday(year):
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-# if __name__ == '__main__':
+if __name__ == '__main__':
     # print(is_nyse_open())
     # print(get_exchange_time())
     # print(get_exchange_rate('USD', 'EUR'))
     # print(get_tickers())
 
-    # print(get_stock_data('NVDA', interval='1m', DAYS=2000))
+    i = get_stock_data('NVDA', interval='1m', DAYS=2000)
+    print(i['DF'].head())
     # print(current_stock_price('AAPL'))
     # print(get_stocks())
     # if is_nyse_open():

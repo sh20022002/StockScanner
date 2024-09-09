@@ -162,18 +162,19 @@ class Strategy:
         avg_roi (float): The average return on investment.
         avg_holding_frame (float): The average holding frame.
     """
-    def __init__(self, name, avg_price, risk_tolerance, top_percent_from_portfolio, **kwargs):
-        self.name = name
-        self.avg_price = avg_price
-        self.risk_tolerance = risk_tolerance  # 0 - 100
-        self.top_percent_from_portfolio = top_percent_from_portfolio
+    def __init__(self, symbol, **kwargs):
+        # self.name = name
+        self.avg_price = scraping.current_stock_price(symbol)
+        self.risk_tolerance = 80 # 0 - 100
+        self.top_percent_from_portfolio = 0
         self.risk_reward_ratio = 0
         self.max_drawdown = 0
-        self.loss_percent = kwargs.get('loss_percent', 0.1)
-        self.profit_percent = kwargs.get('profit_percent', 0.1)
-        self.stoploss = self.avg_price * (1 - self.loss_percent)
-        self.stopprofit = self.avg_price * (1 + self.profit_percent)
-        self.strategy_func, self.avg_roi, self.avg_holding_frame = self.get_strategy_func()
+        self.loss_percent = 5 if risk_tolerance < 80 else 10
+        self.profit_percent = 0 if risk_tolerance < 80 else 5
+        self.stoploss = self.avg_price * (1 - (self.loss_percent / 100))
+        self.stopprofit = None if profit_percent is 0 else self.avg_price * (1 + (self.profit_percent / 100))
+        # self.strategy_func, self.avg_roi, self.avg_holding_frame = self.get_strategy_func()
+        # df , max_key, summery, divid, info
 
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -190,19 +191,44 @@ class Strategy:
         """
         for func in [self.macd, self.rsi, self.ma, self.bollinger_bands]:
             try:
-                df = scraping.get_stock_data(stock, DAYS=1000, interval='1h')
-                res = func(df)
+                df = scraping.get_stock_data(stock, DAYS=730, interval='1h')
+                df , max_key, summery, divid, info = func(df)
             except Exception as e:
                 print(f"Error in {func.__name__}: {e}")
 
-    def get_stock_volatility(self):
+    def get_stock_risk(self):
         """
         Gets the stock volatility.
         
         Returns:
             float: The stock volatility.
         """
-        pass
+        """Earnings Per Share (EPS): Positive values are typically seen as good, but what constitutes a "good" EPS varies by industry. A growing EPS year-over-year is often a positive sign.
+
+        Price-to-Earnings Ratio (P/E):
+
+        High-Growth Industries (e.g., Technology): P/E ratios can be very high (e.g., 20-30 or higher).
+        Mature Industries (e.g., Utilities, Consumer Staples): P/E ratios are generally lower (e.g., 10-20).
+        Debt-to-Equity Ratio:
+
+        Capital-Intensive Industries (e.g., Utilities, Manufacturing): Higher ratios are more common (e.g., above 1.0).
+        Service-Based Industries (e.g., Technology, Retail): Lower ratios are preferred (e.g., below 1.0).
+        Return on Equity (ROE): Generally, an ROE of 15-20% is considered good, but this can vary. Higher is often better, but extremely high values may indicate excessive debt usage.
+
+        Free Cash Flow: Positive free cash flow is generally seen as good, indicating the company can maintain and grow operations. The actual "good" value depends on the company size and industry.
+
+        Dividend Yield:
+
+        Stable, Mature Companies: Higher yields (e.g., 3-6%) are often seen in utilities or real estate.
+        Growth-Oriented Companies: Lower yields (e.g., 0-2%) as they reinvest earnings into growth.
+        Revenue and Revenue Growth: Steady year-over-year growth is ideal. High growth rates are especially valued in newer industries or growth sectors.
+
+        Operating Margins:
+
+        High Margin Industries (e.g., Software): Margins can be very high (e.g., 20-40%).
+        Low Margin Industries (e.g., Retail, Groceries): Lower margins are normal (e.g., 2-5%).
+        """
+        
 
     def macd(self, df):
         """
@@ -403,5 +429,4 @@ def backtest_strategy(df, strategy_func, transaction_cost=0.002, tax_on_profit=0
 
 if __name__ == '__main__':
     df = scraping.get_stock_data('AAPL', DAYS=700) # Load your data here
-    buy_signals, sell_signals = Strategy('MA', 100, 50, 0.1).ma(df)
-    print(buy_signals, sell_signals)
+    
