@@ -163,7 +163,8 @@ class Strategy:
         best_risk_metrics = None
 
         # List of strategy functions to evaluate
-        strategy_functions = ['macd', 'rsi', 'ma', 'bollinger_bands']
+        strategy_functions = ['macd', 'rsi', 'ma', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
+             'donchian_channel', 'atr_breakout', 'parabolic_sar', 'stochastic_oscillator', 'ema_crossover']
 
         # Fetch stock data for backtesting
         try:
@@ -179,6 +180,9 @@ class Strategy:
             
             try:
                 # Backtest each strategy
+                if func == 'macd' and timeframe == '1h':
+                    continue
+
                 performance, risk_metrics = self.backtest_strategy(df, func, self.sector, stop_loss_percent=self.loss_percent, stop_profit_percent=self.profit_percent)
                 # print(f"Performance: {performance}, Risk Metrics: {risk_metrics}")
                 # Compare performance to find the best strategy
@@ -240,6 +244,27 @@ class Strategy:
 
             elif strategy_func == 'bollinger_bands':
                 signals_df = self.bollinger_bands(df)
+
+            elif strategy_func == 'ema_crossover':
+                signals_df = self.ema_crossover(df)
+            
+            elif strategy_func == 'stochastic_oscillator':
+                signals_df = self.stochastic_oscillator(df)
+
+            elif strategy_func == 'parabolic_sar':
+                signals_df = self.parabolic_sar(df)
+
+            elif strategy_func == 'atr_breakout':
+                signals_df = self.atr_breakout(df)
+
+            elif strategy_func == 'donchian_channel':
+                signals_df = self.donchian_channel(df)
+
+            elif strategy_func == 'ichimoku_cloud':
+                signals_df = self.ichimoku_cloud(df)
+
+            elif strategy_func == 'vwap':
+                signals_df = self.vwap(df)
 
             else:
                 raise ValueError(f"Unknown strategy function: {strategy_func}")
@@ -410,6 +435,75 @@ class Strategy:
         
         return risk_score['overall_risk_score']
 
+    def combine_signals(self, timeframe='1d'):
+        """
+        Combines the signals from multiple trading strategies into a single buy/sell signal.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            
+        Returns:
+            pd.DataFrame: The combined buy and sell signals.
+        """
+        df = scraping.get_stock_data(self.symbol , DAYS=730, interval=timeframe)
+        df = df['DF']
+
+        # Get signals from all strategies
+        bollinger_signals = self.bollinger_bands(df)
+        macd_signals = self.macd(df)
+        rsi_signals = self.rsi(df)
+        ema_signals = self.ema_crossover(df)
+        parabolic_sar_signals = self.parabolic_sar(df)
+        donchian_signals = self.donchian_channel(df)
+        atr_signals = self.atr_breakout(df)
+        stochastic_signals = self.stochastic_oscillator(df)
+        ichimoku_signals = self.ichimoku_cloud(df)
+        vwap_signals = self.vwap(df)
+        kloss_vol_signals = self.kloss_vol(df)
+
+        # Combine buy signals
+        buy_signals = (
+            bollinger_signals['Buy_Signal'] |
+            macd_signals['Buy_Signal'] |
+            rsi_signals['Buy_Signal'] |
+            ema_signals['Buy_Signal'] |
+            parabolic_sar_signals['Buy_Signal'] |
+            donchian_signals['Buy_Signal'] |
+            atr_signals['Buy_Signal'] |
+            stochastic_signals['Buy_Signal'] |
+            ichimoku_signals['Buy_Signal'] |
+            vwap_signals['Buy_Signal'] |
+            kloss_vol_signals['Buy_Signal']
+        ).astype(int)
+
+        # Combine sell signals
+        sell_signals = (
+            bollinger_signals['Sell_Signal'] |
+            macd_signals['Sell_Signal'] |
+            rsi_signals['Sell_Signal'] |
+            ema_signals['Sell_Signal'] |
+            parabolic_sar_signals['Sell_Signal'] |
+            donchian_signals['Sell_Signal'] |
+            atr_signals['Sell_Signal'] |
+            stochastic_signals['Sell_Signal'] |
+            ichimoku_signals['Sell_Signal'] |
+            vwap_signals['Sell_Signal'] |
+            kloss_vol_signals['Sell_Signal']
+        ).astype(int)
+
+        # Calculate final signals based on majority vote (e.g., 6 out of 11 strategies agree)
+        threshold = 6  # Change threshold based on how strict you want to be
+        final_buy_signal = buy_signals >= threshold
+        final_sell_signal = sell_signals >= threshold
+
+        # Combine the final buy and sell signals into a single DataFrame
+        combined_signals_df = pd.DataFrame({
+            'Final_Buy_Signal': final_buy_signal,
+            'Final_Sell_Signal': final_sell_signal
+        }, index=df.index)
+
+        return combined_signals_df
+        
     def macd(self, df):
 
         try:
@@ -496,4 +590,253 @@ class Strategy:
         }, index=df.index)
         # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
         
+        return signals_df
+
+    def ema_crossover(self, df, short_window=12, long_window=26):
+        """
+        Calculates the Exponential Moving Average Crossover signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            short_window (int): The window period for the short-term EMA.
+            long_window (int): The window period for the long-term EMA.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        
+        # Calculate short-term and long-term EMAs
+        df['EMA_Short'] = df['Close'].ewm(span=short_window, adjust=False).mean()
+        df['EMA_Long'] = df['Close'].ewm(span=long_window, adjust=False).mean()
+
+        # Generate buy and sell signals
+        buy_signals = (df['EMA_Short'] > df['EMA_Long']) & (df['EMA_Short'].shift(1) <= df['EMA_Long'].shift(1))
+        sell_signals = (df['EMA_Short'] < df['EMA_Long']) & (df['EMA_Short'].shift(1) >= df['EMA_Long'].shift(1))
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def stochastic_oscillator(self, df, k_window=14, d_window=3, overbought=80, oversold=20):
+        """
+        Calculates the Stochastic Oscillator signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            k_window (int): The window period for %K calculation.
+            d_window (int): The window period for %D calculation (signal line).
+            overbought (int): The overbought threshold for sell signals.
+            oversold (int): The oversold threshold for buy signals.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        
+        # Calculate %K (stochastic)
+        df['Low_K'] = df['Low'].rolling(window=k_window).min()
+        df['High_K'] = df['High'].rolling(window=k_window).max()
+        df['%K'] = (df['Close'] - df['Low_K']) / (df['High_K'] - df['Low_K']) * 100
+
+        # Calculate %D (signal line)
+        df['%D'] = df['%K'].rolling(window=d_window).mean()
+
+        # Generate buy and sell signals
+        buy_signals = (df['%K'] < oversold) & (df['%K'].shift(1) >= oversold)
+        sell_signals = (df['%K'] > overbought) & (df['%K'].shift(1) <= overbought)
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def parabolic_sar(self, df, step=0.02, max_step=0.2):
+        """
+        Calculates the Parabolic SAR signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            step (float): The acceleration factor step.
+            max_step (float): The maximum acceleration factor.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        # Initialize variables
+        df['PSAR'] = df['Close']
+        df['PSAR_Trend'] = 'Up'
+
+        # Buy and sell signals
+        buy_signals = []
+        sell_signals = []
+
+        # Initial setup for first PSAR value
+        trend = 'Up'
+        sar = df['Low'][0]  # Starting point for SAR in an uptrend
+        ep = df['High'][0]  # Starting extreme point
+        af = step  # Initial acceleration factor
+
+        for i in range(1, len(df)):
+            if trend == 'Up':
+                sar = sar + af * (ep - sar)
+                if df['Low'][i] < sar:
+                    trend = 'Down'
+                    sar = ep
+                    ep = df['Low'][i]
+                    af = step
+                    sell_signals.append(True)
+                    buy_signals.append(False)
+                else:
+                    buy_signals.append(False)
+                    sell_signals.append(False)
+                    if df['High'][i] > ep:
+                        ep = df['High'][i]
+                        af = min(af + step, max_step)
+            elif trend == 'Down':
+                sar = sar + af * (ep - sar)
+                if df['High'][i] > sar:
+                    trend = 'Up'
+                    sar = ep
+                    ep = df['High'][i]
+                    af = step
+                    buy_signals.append(True)
+                    sell_signals.append(False)
+                else:
+                    buy_signals.append(False)
+                    sell_signals.append(False)
+                    if df['Low'][i] < ep:
+                        ep = df['Low'][i]
+                        af = min(af + step, max_step)
+            df['PSAR'][i] = sar
+            df['PSAR_Trend'][i] = trend
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def atr_breakout(self, df, window=14, multiplier=1.5):
+        """
+        Calculates the ATR breakout signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            window (int): The window period for ATR calculation.
+            multiplier (float): The multiplier for breakout range.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        # Calculate True Range (TR)
+        df['High_Low'] = df['High'] - df['Low']
+        df['High_Close'] = (df['High'] - df['Close'].shift(1)).abs()
+        df['Low_Close'] = (df['Low'] - df['Close'].shift(1)).abs()
+        df['TR'] = df[['High_Low', 'High_Close', 'Low_Close']].max(axis=1)
+
+        # Calculate Average True Range (ATR)
+        df['ATR'] = df['TR'].rolling(window=window).mean()
+
+        # Calculate breakout levels
+        df['Upper_Breakout'] = df['Close'] + (df['ATR'] * multiplier)
+        df['Lower_Breakout'] = df['Close'] - (df['ATR'] * multiplier)
+
+        # Generate buy and sell signals
+        buy_signals = (df['Close'] > df['Upper_Breakout'])
+        sell_signals = (df['Close'] < df['Lower_Breakout'])
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def donchian_channel(self, df, window=20):
+        """
+        Calculates the Donchian Channel breakout signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            window (int): The window period for Donchian Channel calculation.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        # Calculate Donchian Channel
+        df['Donchian_High'] = df['High'].rolling(window=window).max()
+        df['Donchian_Low'] = df['Low'].rolling(window=window).min()
+
+        # Generate buy and sell signals
+        buy_signals = (df['Close'] > df['Donchian_High'].shift(1))
+        sell_signals = (df['Close'] < df['Donchian_Low'].shift(1))
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def ichimoku_cloud(self, df, conversion_window=9, base_window=26, leading_span_window=52):
+        """
+        Calculates the Ichimoku Cloud signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data.
+            conversion_window (int): The window period for the conversion line.
+            base_window (int): The window period for the base line.
+            leading_span_window (int): The window period for the leading span A.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        # Calculate Ichimoku components
+        df['Conversion_Line'] = (df['High'].rolling(window=conversion_window).max() + df['Low'].rolling(window=conversion_window).min()) / 2
+        df['Base_Line'] = (df['High'].rolling(window=base_window).max() + df['Low'].rolling(window=base_window).min()) / 2
+        df['Leading_Span_A'] = ((df['Conversion_Line'] + df['Base_Line']) / 2).shift(base_window)
+        df['Leading_Span_B'] = ((df['High'].rolling(window=leading_span_window).max() + df['Low'].rolling(window=leading_span_window).min()) / 2).shift(base_window)
+
+        # Buy signals when price crosses above the cloud
+        buy_signals = (df['Close'] > df['Leading_Span_A']) & (df['Close'] > df['Leading_Span_B']) & (df['Close'].shift(1) <= df['Leading_Span_A'])
+
+        # Sell signals when price crosses below the cloud
+        sell_signals = (df['Close'] < df['Leading_Span_A']) & (df['Close'] < df['Leading_Span_B']) & (df['Close'].shift(1) >= df['Leading_Span_A'])
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
+        return signals_df
+
+    def vwap(self, df):
+        """
+        Calculates VWAP (Volume Weighted Average Price) buy and sell signals.
+        
+        Args:
+            df (pd.DataFrame): The historical price data with volume information.
+            
+        Returns:
+            pd.DataFrame: The buy and sell signals.
+        """
+        # Calculate VWAP
+        df['Cumulative_Price_Vol'] = (df['Close'] * df['Volume']).cumsum()
+        df['Cumulative_Vol'] = df['Volume'].cumsum()
+        df['VWAP'] = df['Cumulative_Price_Vol'] / df['Cumulative_Vol']
+
+        # Buy and sell signals
+        buy_signals = (df['Close'] > df['VWAP']) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
+        sell_signals = (df['Close'] < df['VWAP']) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
+
+        signals_df = pd.DataFrame({
+            'Buy_Signal': buy_signals,
+            'Sell_Signal': sell_signals
+        }, index=df.index)
+
         return signals_df
