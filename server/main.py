@@ -3,6 +3,17 @@ import time
 from datetime import datetime
 import strategy
 
+
+def chack_data():
+    fields = {}
+    for key, value in data['INFO'].items():
+        if key in fields:
+            fields[key] = fields[key] + 1  # Increment the value if the key exists
+        else:
+            fields[key] = 1  # Initialize the key with 1 if it doesn't exist
+    for key, value in fields.items():
+        print(f"{key}-->{value}")
+
         
 def run_trading_while_market_is_open(fivem=300):
     """
@@ -19,15 +30,16 @@ def run_trading_while_market_is_open(fivem=300):
     signal_stack = strategy.SignalStack()
     timeframe = ['1d', '1h', '1m']
 
-    while not scraping.is_nyse_open():  
+    while scraping.is_nyse_open():  
+
         for symbol in scraping.get_tickers():
 
             symbol = symbol[0]
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             
-            data = scraping.get_stock_data(symbol, interval=timeframe[2], DAYS=730, return_flags={
-                                                                'DF': True,
+            data = scraping.get_stock_data('NVDA', interval=timeframe[0], DAYS=730, return_flags={
+                                                                'DF': False,
                                                                 'MAX_KEY': False,
                                                                 'SUMMERY': False,
                                                                 'DIVD': False,
@@ -35,7 +47,13 @@ def run_trading_while_market_is_open(fivem=300):
                                                                 } )
                 
             stock = strategy.Strategy( **data['INFO'])
-            print(stock.get_strategy_func(timeframe[2]))
+            # Assuming 'df' is your DataFrame and 'strategy_func' is the strategy function
+            best_strategy, best_performance, best_risk_metrics = stock.get_strategy_func(timeframe=timeframe[0])
+
+            print(f"best_strategy - {best_strategy}, best_performance - {best_performance}, \n best_risk_metrics - {best_risk_metrics}")
+
+
+            break
             # print(df)
             # for date, (buy_signal, sell_signal) in zip(data['DF'].index, zip(buy_signals, sell_signals)):
             #     if buy_signal or sell_signal:

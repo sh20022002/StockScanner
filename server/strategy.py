@@ -115,22 +115,38 @@ class Strategy:
         avg_holding_frame (float): The average holding frame.
     """
     def __init__(self, **kwargs):
+        # Set attributes from kwargs dynamically
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+        # Get the average stock price using scraping function
         self.avg_price = scraping.current_stock_price(self.symbol)
-        self.risk_tolerance = self.calculate_risk_score()
+
+        # Try to calculate the risk tolerance, default to 1 if it fails
+        try:
+            self.risk_tolerance = self.calculate_risk_score()
+        except Exception as e:
+            print(f"Error calculating risk score: {e}")
+            self.risk_tolerance = 1
+
+        # Set other attributes
         self.top_percent_from_portfolio = 0
         self.risk_reward_ratio = 0
         self.max_drawdown = 0
-        self.loss_percent = 5 if self.risk_tolerance < 80 else 10
-        self.profit_percent = 0 if self.risk_tolerance < 80 else 5
-        self.stoploss = self.avg_price * (1 - (self.loss_percent / 100))
-        self.stopprofit = None if self.profit_percent == 0 else self.avg_price * (1 + (self.profit_percent / 100))
+        
+        # Loss and profit percent logic based on risk tolerance
+        self.loss_percent = 5 if self.risk_tolerance < 80 else 7
+        self.profit_percent = None if self.risk_tolerance < 80 else 10
         
         
 
     def __str__(self):
         return "\n".join(f'{key}: {value}' for key, value in self.__dict__.items())
+    
+    
+
+        
+
 
     def get_strategy_func(self, timeframe='1d'):
         """
@@ -163,7 +179,7 @@ class Strategy:
             
             try:
                 # Backtest each strategy
-                performance, risk_metrics = self.backtest_strategy(df, func, self.sector)
+                performance, risk_metrics = self.backtest_strategy(df, func, self.sector, stop_loss_percent=self.loss_percent, stop_profit_percent=self.profit_percent)
                 # print(f"Performance: {performance}, Risk Metrics: {risk_metrics}")
                 # Compare performance to find the best strategy
                 if performance > best_performance:
@@ -171,25 +187,27 @@ class Strategy:
                     best_strategy = func
                     best_risk_metrics = risk_metrics
 
-                # print(f"Strategy: {func}, Performance: {performance}, Risk Metrics: {risk_metrics} \n")
+                print(f"Strategy: {func}, Performance: {performance}, \n Risk Metrics: {risk_metrics} \n")
 
             except Exception as e:
                 print(f"Error in {func}: {e}")
 
         # Return the best strategy with its performance and risk metrics
         return best_strategy, best_performance, best_risk_metrics
-    
-    def backtest_strategy(self, df, strategy_func, my_sector, transaction_cost=0, tax_on_profit=0.25):
+
+    def backtest_strategy(self, df, strategy_func, my_sector, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=2, stop_profit_percent=None):
         """
-        Backtests a trading strategy based on buy and sell signals.
-    
-        Args:
-        df (pd.DataFrame): The historical price data.
-        strategy_func (function): The trading strategy function that returns buy/sell signals.
-        my_sector (str): The sector to allocate trades.
-        transaction_cost (float): The transaction cost per trade.
-        tax_on_profit (float): The tax on profit.
+        Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
         
+        Args:
+            df (pd.DataFrame): The historical price data.
+            strategy_func (function): The trading strategy function that returns buy/sell signals.
+            my_sector (str): The sector to allocate trades.
+            transaction_cost (float): The transaction cost per trade.
+            tax_on_profit (float): The tax on profit.
+            stop_loss_percent (float, optional): The percentage for a moving stop-loss trigger. If None, no stop-loss is applied.
+            stop_profit_percent (float, optional): The percentage for stop-profit trigger. If None, no stop-profit is applied.
+            
         Returns:
             tuple: The performance and risk metrics of the strategy.
         """
@@ -197,12 +215,13 @@ class Strategy:
         cash = 100000  # Initial capital
         starting_cash = cash
         position = 0  # Number of shares held
-        average_price = 0  # Average price of shares
+        entry_price = 0  # Price at which we entered the position
         max_drawdown = 0
         peak_value = cash
         win_rate = 0
         total_trades = 0
         winning_trades = 0
+        highest_price = 0  # Track the highest price since buying for trailing stop-loss
         sectors = ['Technology', 'Financial Services', 'Healthcare', 'Consumer Cyclical', 
                 'Industrials', 'Communication Services', 'Consumer Defensive', 'Energy', 
                 'Real Estate', 'Basic Materials', 'Utilities']
@@ -228,35 +247,69 @@ class Strategy:
         except Exception as e:
             print(f"Error in strategy function: {e}")
             return None, None
-        # print(signals_df)
+        
         if signals_df is None:
             return None, None
+
         # Iterate over each row in the DataFrame
-        
         for index, row in signals_df.iterrows():
+            current_price = df.loc[index]['Close']
+
             # Buy logic
-        
             if row['Buy_Signal'] and cash > 0:
-                position = cash / df.loc[index]['Close']  # Buy as many shares as possible
-                  # Set average price
-                average_price = df.loc[index]['Close']
+                position = cash / current_price  # Buy as many shares as possible
+                entry_price = current_price  # Set entry price
                 cash = 0  # All cash used
                 total_trades += 1
-                sector_allocation[my_sector] += position * df.loc[index]['Close']  # Allocate to sector
+                highest_price = current_price  # Start tracking the highest price for trailing stop-loss
+                sector_allocation[my_sector] += position * current_price  # Allocate to sector
 
-            # Sell logic
-            elif row['Sell_Signal'] and position > 0:
-                # Sell all shares
-                sell_value = position * df.loc[index]['Close']
-                cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
+                # Set stop-loss and stop-profit prices only if the values are provided
+                if stop_loss_percent is not None:
+                    stop_loss_price = entry_price * (1 - stop_loss_percent / 100)  # Initial stop-loss price
+                else:
+                    stop_loss_price = None
 
-                # Calculate profit and apply tax
-                profit = cash - starting_cash
-                cash -= profit * tax_on_profit  # Apply tax on profit
-                # Count winning trades
-                if cash >= average_price * position:  # If we made a profit
-                    winning_trades += 1
-                position = 0  # No shares left after selling
+                if stop_profit_percent is not None:
+                    stop_profit_price = entry_price * (1 + stop_profit_percent / 100)  # Initial stop-profit price
+                else:
+                    stop_profit_price = None
+
+            # Sell logic based on moving stop-loss, stop-profit, or sell signal
+            elif position > 0:
+                # Update highest price reached if the current price is higher
+                if current_price > highest_price:
+                    highest_price = current_price
+
+                    # Update the stop-loss price based on the new highest price (moving stop-loss)
+                    if stop_loss_percent is not None:
+                        stop_loss_price = highest_price * (1 - stop_loss_percent / 100)
+
+                # Check stop-loss logic (if provided)
+                if stop_loss_price is not None and current_price <= stop_loss_price:
+                    sell_value = position * current_price
+                    cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
+                    position = 0  # Exit position
+                    
+                
+                # Check stop-profit logic (if provided)
+                elif stop_profit_price is not None and current_price >= stop_profit_price:
+                    sell_value = position * current_price
+                    cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
+                    position = 0  # Exit position
+                    
+                
+                # Regular sell logic based on sell signal
+                elif row['Sell_Signal']:
+                    sell_value = position * current_price
+                    cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
+                    profit = cash - starting_cash
+                    cash -= profit * tax_on_profit  # Apply tax on profit
+                    position = 0  # Exit position
+                    
+                    # Count winning trades
+                    if cash >= entry_price * position:  # If we made a profit
+                        winning_trades += 1
 
                 # Update drawdown and peak value
                 if cash > peak_value:
@@ -265,15 +318,13 @@ class Strategy:
                 if drawdown > max_drawdown:
                     max_drawdown = drawdown
 
-                
         # Final calculations
         final_cash = cash + (position * df.iloc[-1]['Close'] if position > 0 else 0)  # Cash value at end
         win_rate = 0 if (winning_trades <= 0) or (total_trades <= 0) else winning_trades / total_trades  # Calculate win rate
         win_rate = round(win_rate * 100, 2)  # Convert to percentage
-        performance = final_cash - starting_cash # Total performance (profit/loss)
+        performance = final_cash - starting_cash  # Total performance (profit/loss)
         timeframe = (df.index[-1] - df.index[0]).days
         roi = ((final_cash - starting_cash) / starting_cash) * 100  # Return on investment
-
 
         # Risk metrics to return
         risk_metrics = {
@@ -284,6 +335,8 @@ class Strategy:
         }
 
         return performance, risk_metrics
+
+
 
     def calculate_risk_score(self):
         """
@@ -373,10 +426,10 @@ class Strategy:
             'Sell_Signal': sell_signals
         }, index=df.index)
 
-        # Filter the DataFrame to include only rows where either the buy signal or sell signal is true
-        filtered_signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
+        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
 
-        return filtered_signals_df
+        return signals_df
+
         
     def rsi(self, df):
         """
@@ -395,11 +448,9 @@ class Strategy:
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
         }, index=df.index)
-
-        # Filter the DataFrame to include only rows where either the buy signal or sell signal is true
-        filtered_signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
+        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
         
-        return filtered_signals_df
+        return signals_df
 
     def ma(self, df):
         """
@@ -417,12 +468,9 @@ class Strategy:
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
         }, index=df.index)
+        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
 
-        # Filter the DataFrame to include only rows where either the buy signal or sell signal is true
-        filtered_signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-
-        
-        return filtered_signals_df
+        return signals_df
 
     def bollinger_bands(self, df, window=20, num_std_dev=2):
         """
@@ -446,8 +494,6 @@ class Strategy:
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
         }, index=df.index)
-
-        # Filter the DataFrame to include only rows where either the buy signal or sell signal is true
-        filtered_signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
+        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
         
-        return filtered_signals_df
+        return signals_df

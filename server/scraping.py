@@ -68,62 +68,67 @@ def get_stock_data(stock, return_flags={
 
     start_date = end_date - timedelta(DAYS)  # days before the end date
     stock_ticker = yf.Ticker(stock)
-    data = stock_ticker.recommendations
-    summery = stock_ticker.info['longBusinessSummary']
+    
+    if return_flags.get('SUMMERY', False):
+        data = stock_ticker.recommendations
+        summery = stock_ticker.info['longBusinessSummary']
 
     info = stock_ticker.info
 
-    max_key = stock_ticker.info['recommendationKey']
-    divid = 'No Dividend'
-    last_dividend_date_timestamp = info.get('lastDividendDate')
-    if last_dividend_date_timestamp:
-        last_dividend_date = datetime.fromtimestamp(last_dividend_date_timestamp)
-        divid = f"{last_dividend_date.strftime('%Y-%m-%d')} : {info.get('lastDividendValue')} $"
+    if return_flags.get('MAX_KEY', False):
+        max_key = stock_ticker.info['recommendationKey']
+
+    if return_flags.get('DIVD', False):
+        divid = 'No Dividend'
+        last_dividend_date_timestamp = info.get('lastDividendDate')
+        if last_dividend_date_timestamp:
+            last_dividend_date = datetime.fromtimestamp(last_dividend_date_timestamp)
+            divid = f"{last_dividend_date.strftime('%Y-%m-%d')} : {info.get('lastDividendValue')} $"
+            
+
+    
+    if return_flags.get('DF', False):    
+        df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
+    
+        if df.index.name == 'Date':
+            df = df.rename_axis('Datetime')
+            df.index = pd.to_datetime(df.index)
+
+        if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
+            df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
         
+        df['SMA20'] = ta.sma(df['Close'], length=20)
+        df['SMA50'] = ta.sma(df['Close'], length=50)
+        df['SMA100'] = ta.sma(df['Close'], length=100)
+        df['SMA150'] = ta.sma(df['Close'], length=150)
+        df['SMA200'] = ta.sma(df['Close'], length=200)
+        df['EMA20'] = ta.ema(df['Close'], length=20)
+        df['RSI'] = ta.ema(df['Close'], length=20)
 
-    
+        if interval != '1h':
+            adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+            df['ADX'] = adx['ADX_14']
+        # df['DMP'] = adx['DMP_14']
+        # df['DMN'] = adx['DMN_14']
+
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+
+        if interval not in ['1h' ,'1wk', '1mo', '3mo']:
+            KLASS_VOL = ta.kvo(df['High'], df['Low'], df['Close'], df['Volume'], fast=34, slow=55, signal=13)
+            if KLASS_VOL is not None:
+                df['KLASS_VOL'] = KLASS_VOL['KVO_34_55_13']
+                df['KLASS_VOL_Signal'] = KLASS_VOL['KVOs_34_55_13']
+            else:
+                print(f"Warning: KVO calculation failed for  with interval {interval}")
         
-    df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
-    
-    if df.index.name == 'Date':
-        df = df.rename_axis('Datetime')
-        df.index = pd.to_datetime(df.index)
-
-    if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
-        df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
-    
-    df['SMA20'] = ta.sma(df['Close'], length=20)
-    df['SMA50'] = ta.sma(df['Close'], length=50)
-    df['SMA100'] = ta.sma(df['Close'], length=100)
-    df['SMA150'] = ta.sma(df['Close'], length=150)
-    df['SMA200'] = ta.sma(df['Close'], length=200)
-    df['EMA20'] = ta.ema(df['Close'], length=20)
-    df['RSI'] = ta.ema(df['Close'], length=20)
-
-    if interval != '1h':
-        adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-        df['ADX'] = adx['ADX_14']
-    # df['DMP'] = adx['DMP_14']
-    # df['DMN'] = adx['DMN_14']
-
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-
-    if interval not in ['1h' ,'1wk', '1mo', '3mo']:
-        KLASS_VOL = ta.kvo(df['High'], df['Low'], df['Close'], df['Volume'], fast=34, slow=55, signal=13)
-        if KLASS_VOL is not None:
-            df['KLASS_VOL'] = KLASS_VOL['KVO_34_55_13']
-            df['KLASS_VOL_Signal'] = KLASS_VOL['KVOs_34_55_13']
-        else:
-            print(f"Warning: KVO calculation failed for  with interval {interval}")
-    
-    if interval not in ['1h', '1mo', '3mo']:
-        macd = ta.macd(df['Close'])
-        if macd is not None:
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_Signal'] = macd['MACDs_12_26_9']
-            df['MACD_Hist'] = macd['MACDh_12_26_9']
-        else:
-            print(f"Warning: MACD calculation failed for with interval {interval}")
+        if interval not in ['1h', '1mo', '3mo']:
+            macd = ta.macd(df['Close'])
+            if macd is not None:
+                df['MACD'] = macd['MACD_12_26_9']
+                df['MACD_Signal'] = macd['MACDs_12_26_9']
+                df['MACD_Hist'] = macd['MACDh_12_26_9']
+            else:
+                print(f"Warning: MACD calculation failed for with interval {interval}")
 
     # return (info)
     
