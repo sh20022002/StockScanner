@@ -37,20 +37,31 @@ def run_trading_while_market_is_open(fivem=300):
             symbol = symbol[0]
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
-            
-            data = scraping.get_stock_data('NVDA', interval=timeframe[0], DAYS=730, return_flags={
-                                                                'DF': False,
-                                                                'MAX_KEY': False,
-                                                                'SUMMERY': False,
-                                                                'DIVD': False,
-                                                                'INFO': True
-                                                                } )
-                
-            stock = strategy.Strategy( **data['INFO'])
-            # Assuming 'df' is your DataFrame and 'strategy_func' is the strategy function
-            best_strategy, best_performance, best_risk_metrics = stock.get_strategy_func(timeframe=timeframe[0])
+            try:
+                data = scraping.get_stock_data(symbol , interval=timeframe[0], period='max', return_flags={
+                                                                    'DF': True,
+                                                                    'MAX_KEY': False,
+                                                                    'SUMMERY': False,
+                                                                    'DIVD': False,
+                                                                    'INFO': True
+                                                                    } )
+            except Exception as e:
+                print(f"Error: {e}")
+                continue
 
-            print(f"best_strategy - {best_strategy}, best_performance - {best_performance}, \n best_risk_metrics - {best_risk_metrics}")
+            stock = strategy.Strategy( **data['INFO'])
+
+            print(stock.detect_signals_multithread(data['DF']))
+
+            # # Assuming 'df' is your DataFrame and 'strategy_func' is the strategy function
+            # for st in ['rsi', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
+            #                 'donchian_channel', 'stochastic_oscillator', 'ema_crossover', 'parabolic_sar', 'ma', 'macd', 'atr_breakout']:
+
+                            # , 'parabolic_sar', 'ma', 'macd', 'atr_breakout',
+
+            # best_strategy, best_performance, best_risk_metrics = stock.get_strategy_func()
+
+            # print(f"Best Strategy: {best_strategy}, Best Performance: {best_performance}, Best Risk Metrics: {best_risk_metrics}")
 
 
             break

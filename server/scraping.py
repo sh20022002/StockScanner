@@ -27,7 +27,7 @@ def get_stock_data(stock, return_flags={
                                         'SUMMERY': False,
                                         'DIVD': False,
                                         'INFO': False
-                                        }, DAYS=365, interval='1h'):
+                                        }, DAYS=365, interval='1h', period=None):
 
     '''- return_flags (dict): A dictionary specifying which return values to include.
         - DF (bool): If True, include the DataFrame of historical stock data. Default is False.
@@ -35,12 +35,6 @@ def get_stock_data(stock, return_flags={
         - SUMMERY (bool): If True, include the long business summary. Default is False.
         - DIVD (bool): If True, include the last dividend information. Default is False.
         - INFO (bool): If True, include the stock information. Default is False.
-    - dict: A dictionary containing the requested return values.
-        - DF (DataFrame): A pandas DataFrame containing the historical stock data.
-        - MAX_KEY (str): The maximum recommendation key.
-        - SUMMERY (str): The long business summary.
-        - DIVD (str): The last dividend information.
-        - INFO (dict): The stock information.
     
     Get historical stock data for a given stock symbol.
 
@@ -48,6 +42,7 @@ def get_stock_data(stock, return_flags={
     - stock (str): The stock symbol.
     - DAYS (int): The number of days of historical data to retrieve. Default is 365.
     - interval (str): Valid intervals: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo]
+    - period (str): Valid periods: [1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max] used to get current data with 1d interval
 
     Returns:
         dict: A dictionary containing the requested return values.
@@ -87,16 +82,24 @@ def get_stock_data(stock, return_flags={
             
 
     
-    if return_flags.get('DF', False):    
-        df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
-    
+    if return_flags.get('DF', False): 
+        # past data
+        if period is None:   
+            df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
+        # current data
+        else:
+            df = stock_ticker.history(period=period, interval=interval)
+        
+        # some intervals have different index name
         if df.index.name == 'Date':
             df = df.rename_axis('Datetime')
             df.index = pd.to_datetime(df.index)
 
+        # drop columns that are not needed but some intervals don't have them
         if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
             df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
         
+        # add some technical indicators
         df['SMA20'] = ta.sma(df['Close'], length=20)
         df['SMA50'] = ta.sma(df['Close'], length=50)
         df['SMA100'] = ta.sma(df['Close'], length=100)
@@ -105,46 +108,28 @@ def get_stock_data(stock, return_flags={
         df['EMA20'] = ta.ema(df['Close'], length=20)
         df['RSI'] = ta.ema(df['Close'], length=20)
 
-        if interval != '1h':
-            adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-            df['ADX'] = adx['ADX_14']
-        # df['DMP'] = adx['DMP_14']
-        # df['DMN'] = adx['DMN_14']
+        if interval in ['1m', '1d', '5d', '1wk', '1mo', '3mo']:
+            macd = df.ta.macd(fast=12, slow=26, signal=9)
+            df['MACD'] = macd['MACD_12_26_9']
+            df['MACD_Signal'] = macd['MACDs_12_26_9']
+            df['MACD_Hist'] = macd['MACDh_12_26_9']
 
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-
-        if interval not in ['1h' ,'1wk', '1mo', '3mo']:
-            KLASS_VOL = ta.kvo(df['High'], df['Low'], df['Close'], df['Volume'], fast=34, slow=55, signal=13)
-            if KLASS_VOL is not None:
-                df['KLASS_VOL'] = KLASS_VOL['KVO_34_55_13']
-                df['KLASS_VOL_Signal'] = KLASS_VOL['KVOs_34_55_13']
-            else:
-                print(f"Warning: KVO calculation failed for  with interval {interval}")
         
-        if interval not in ['1h', '1mo', '3mo']:
-            macd = ta.macd(df['Close'])
-            if macd is not None:
-                df['MACD'] = macd['MACD_12_26_9']
-                df['MACD_Signal'] = macd['MACDs_12_26_9']
-                df['MACD_Hist'] = macd['MACDh_12_26_9']
-            else:
-                print(f"Warning: MACD calculation failed for with interval {interval}")
-
-    # return (info)
-    
+    # return the requested values in return_flags at input
     return_values = {}
     if return_flags.get('DF', False):
         return_values['DF'] = df
     if return_flags.get('MAX_KEY', False):
-        return_values['MAX_KEY'] = max_key  # Assuming max_key is defined elsewhere
+        return_values['MAX_KEY'] = max_key  
     if return_flags.get('SUMMERY', False):
-        return_values['SUMMERY'] = summery  # Assuming summery is defined elsewhere
+        return_values['SUMMERY'] = summery  
     if return_flags.get('DIVD', False):
-        return_values['DIVD'] = divd  # Assuming divd is defined elsewhere
+        return_values['DIVD'] = divd  
     if return_flags.get('INFO', False):
-        return_values['INFO'] = info  # Assuming info is defined elsewhere
+        return_values['INFO'] = info  
 
     return return_values
+
 
 def get_tickers():
     '''
@@ -290,17 +275,5 @@ def easter_monday(year):
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-if __name__ == '__main__':
-    # print(is_nyse_open())
-    # print(get_exchange_time())
-    # print(get_exchange_rate('USD', 'EUR'))
-    # # print(get_tickers())
-    for interval in ['1m', '1h', '1d', '5d', '1wk', '1mo', '3mo']:
-        i = get_stock_data('NVDA', interval=interval, DAYS=2000)
-        print(interval, i['DF'].head())
-    # print(current_stock_price('AAPL'))
-    # print(get_stocks())
-    # if is_nyse_open():
-        # print('The NYSE is currently open.')
-    # else:
-        # print('The NYSE is currently closed.')
+
+   

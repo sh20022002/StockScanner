@@ -2,10 +2,10 @@ import random
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from deap import base, creator, tools, algorithms
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import scraping  # Assuming this is your module for fetching stock data
-from sklearn.model_selection import ParameterGrid
+
+
 
 class Signal:
     """
@@ -143,63 +143,75 @@ class Strategy:
     def __str__(self):
         return "\n".join(f'{key}: {value}' for key, value in self.__dict__.items())
     
-    
-
-        
 
 
-    def get_strategy_func(self, timeframe='1d'):
+    def get_strategy_func(self, timeframe='1h', num_threads=5):
         """
-        Evaluates multiple strategies and returns the one with the best performance.
-    
-        Args:
-            stock (str): The stock symbol for which to fetch the data and evaluate strategies.
+        Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
         
+        Args:
+            timeframe (str): Timeframe for fetching stock data (e.g., '1d', '1h').
+            num_threads (int): Number of threads to use for concurrent backtesting.
+            
         Returns:
             tuple: The best strategy function, along with its performance and risk metrics.
         """
+
+        def backtest_strategy_task(strategy_func):
+            try:
+                # Call the existing backtest_strategy method for the current strategy
+                performance, risk_metrics = self.backtest_strategy(df, strategy_func, self.sector, 
+                                                                stop_loss_percent=self.loss_percent, 
+                                                                stop_profit_percent=self.profit_percent)
+                return strategy_func, performance, risk_metrics
+            except Exception as e:
+                print(f"Error in strategy {strategy_func}: {e}")
+                return None
+
         best_strategy = None
         best_performance = float('-inf')  # Initialize with very low performance
         best_risk_metrics = None
 
         # List of strategy functions to evaluate
         strategy_functions = ['macd', 'rsi', 'ma', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
-             'donchian_channel', 'atr_breakout', 'parabolic_sar', 'stochastic_oscillator', 'ema_crossover']
+                            'donchian_channel', 'atr_breakout', 'parabolic_sar', 'stochastic_oscillator', 'ema_crossover', 'combined']
+
 
         # Fetch stock data for backtesting
         try:
-            df = scraping.get_stock_data(self.symbol , DAYS=730, interval=timeframe)
+            df = scraping.get_stock_data(self.symbol, DAYS=730, interval=timeframe)
             df = df['DF']
         except Exception as e:
             print(f"Error fetching data for {self.symbol}: {e}")
-            
+            return None, None, None
 
-        # Iterate over each strategy function
-        for func in strategy_functions:
-            
-            
-            try:
-                # Backtest each strategy
-                if func == 'macd' and timeframe == '1h':
-                    continue
 
-                performance, risk_metrics = self.backtest_strategy(df, func, self.sector, stop_loss_percent=self.loss_percent, stop_profit_percent=self.profit_percent)
-                # print(f"Performance: {performance}, Risk Metrics: {risk_metrics}")
-                # Compare performance to find the best strategy
-                if performance > best_performance:
-                    best_performance = performance
-                    best_strategy = func
-                    best_risk_metrics = risk_metrics
+        # Run the strategy backtests concurrently using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(backtest_strategy_task, func): func for func in strategy_functions}
 
-                print(f"Strategy: {func}, Performance: {performance}, \n Risk Metrics: {risk_metrics} \n")
+            # Iterate over completed futures and get results
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    strategy_func, performance, risk_metrics = result
 
-            except Exception as e:
-                print(f"Error in {func}: {e}")
+                    if performance is None:
+                        continue
 
-        # Return the best strategy with its performance and risk metrics
+                    # Check if this strategy has the best performance
+                    if performance > best_performance:
+                        best_performance = performance
+                        best_strategy = strategy_func
+                        best_risk_metrics = risk_metrics
+                    print(f"Strategy: {strategy_func}, Performance: {performance}, \n Risk Metrics: {risk_metrics}")
+        
         return best_strategy, best_performance, best_risk_metrics
 
-    def backtest_strategy(self, df, strategy_func, my_sector, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=2, stop_profit_percent=None):
+        
+
+
+    def backtest_strategy(self, df, strategy_func, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=5, stop_profit_percent=5):
         """
         Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
         
@@ -226,11 +238,7 @@ class Strategy:
         total_trades = 0
         winning_trades = 0
         highest_price = 0  # Track the highest price since buying for trailing stop-loss
-        sectors = ['Technology', 'Financial Services', 'Healthcare', 'Consumer Cyclical', 
-                'Industrials', 'Communication Services', 'Consumer Defensive', 'Energy', 
-                'Real Estate', 'Basic Materials', 'Utilities']
-        sector_allocation = {sector: 0 for sector in sectors}
-
+        
         # Get the buy and sell signals from the strategy function
         try:
             if strategy_func == 'macd':
@@ -266,6 +274,9 @@ class Strategy:
             elif strategy_func == 'vwap':
                 signals_df = self.vwap(df)
 
+            elif strategy_func == 'combined':
+                signals_df = self.detect_signals_multithread(df, threshold=3)
+
             else:
                 raise ValueError(f"Unknown strategy function: {strategy_func}")
 
@@ -287,7 +298,7 @@ class Strategy:
                 cash = 0  # All cash used
                 total_trades += 1
                 highest_price = current_price  # Start tracking the highest price for trailing stop-loss
-                sector_allocation[my_sector] += position * current_price  # Allocate to sector
+                
 
                 # Set stop-loss and stop-profit prices only if the values are provided
                 if stop_loss_percent is not None:
@@ -435,75 +446,73 @@ class Strategy:
         
         return risk_score['overall_risk_score']
 
-    def combine_signals(self, timeframe='1d'):
+   
+
+
+    def detect_signals_multithread(self, df, threshold=3):
         """
-        Combines the signals from multiple trading strategies into a single buy/sell signal.
+        Detects buy and sell signals using multiple trading strategies with multithreading.
+        Works with both live stock data and historical stock data.
         
         Args:
-            df (pd.DataFrame): The historical price data.
+            symbol (str): The stock symbol for which signals should be detected.
+            data_source (str): 'live' for live stock data, 'historical' for historical stock data.
+            threshold (int): Minimum number of strategies that must agree to generate a final buy/sell signal.
             
         Returns:
-            pd.DataFrame: The combined buy and sell signals.
+            pd.DataFrame: A DataFrame containing the combined buy and sell signals.
         """
-        df = scraping.get_stock_data(self.symbol , DAYS=730, interval=timeframe)
-        df = df['DF']
+        # Fetch live or historical stock data based on the data source
+        
+        if df is None or df.empty:
+            print(f"No data available for symbol {symbol}")
+            return None
 
-        # Get signals from all strategies
-        bollinger_signals = self.bollinger_bands(df)
-        macd_signals = self.macd(df)
-        rsi_signals = self.rsi(df)
-        ema_signals = self.ema_crossover(df)
-        parabolic_sar_signals = self.parabolic_sar(df)
-        donchian_signals = self.donchian_channel(df)
-        atr_signals = self.atr_breakout(df)
-        stochastic_signals = self.stochastic_oscillator(df)
-        ichimoku_signals = self.ichimoku_cloud(df)
-        vwap_signals = self.vwap(df)
-        kloss_vol_signals = self.kloss_vol(df)
+        # Define tasks for multithreading
+        tasks = [
+            ('macd',  self.macd(df)),
+            ('rsi',  self.rsi(df)),
+            ('ma',  self.ma(df)),
+            ('bollinger_bands',  self.bollinger_bands(df)),
+            ('vwap',  self.vwap(df)),
+            ('ichimoku_cloud',  self.ichimoku_cloud(df)),
+            ('donchian_channel',  self.donchian_channel(df)),
+            ('atr_breakout',  self.atr_breakout(df)),
+            ('parabolic_sar',  self.parabolic_sar(df)),
+            ('stochastic_oscillator',  self.stochastic_oscillator(df)),
+            ('ema_crossover',  self.ema_crossover(df))
+        ]
 
-        # Combine buy signals
-        buy_signals = (
-            bollinger_signals['Buy_Signal'] |
-            macd_signals['Buy_Signal'] |
-            rsi_signals['Buy_Signal'] |
-            ema_signals['Buy_Signal'] |
-            parabolic_sar_signals['Buy_Signal'] |
-            donchian_signals['Buy_Signal'] |
-            atr_signals['Buy_Signal'] |
-            stochastic_signals['Buy_Signal'] |
-            ichimoku_signals['Buy_Signal'] |
-            vwap_signals['Buy_Signal'] |
-            kloss_vol_signals['Buy_Signal']
-        ).astype(int)
+        # Run all tasks concurrently using multithreading
+        with ThreadPoolExecutor(max_workers=threshold) as executor:
+            futures = {executor.submit(task[1], df): task[0] for task in tasks}
+            resoults = {future.result(): task for future, task in futures.items()}
 
-        # Combine sell signals
-        sell_signals = (
-            bollinger_signals['Sell_Signal'] |
-            macd_signals['Sell_Signal'] |
-            rsi_signals['Sell_Signal'] |
-            ema_signals['Sell_Signal'] |
-            parabolic_sar_signals['Sell_Signal'] |
-            donchian_signals['Sell_Signal'] |
-            atr_signals['Sell_Signal'] |
-            stochastic_signals['Sell_Signal'] |
-            ichimoku_signals['Sell_Signal'] |
-            vwap_signals['Sell_Signal'] |
-            kloss_vol_signals['Sell_Signal']
-        ).astype(int)
+        # Initialize buy and sell signal counters
+        buy_signals = pd.Series(0, index=df.index)
+        sell_signals = pd.Series(0, index=df.index)
 
-        # Calculate final signals based on majority vote (e.g., 6 out of 11 strategies agree)
-        threshold = 6  # Change threshold based on how strict you want to be
+        # Combine signals from all strategies
+        for  result_df, future in results.items():
+            buy_signals += result_df['Buy_Signal'].astype(int)
+            sell_signals += result_df['Sell_Signal'].astype(int)
+
+        # Create final signals based on threshold
         final_buy_signal = buy_signals >= threshold
         final_sell_signal = sell_signals >= threshold
 
-        # Combine the final buy and sell signals into a single DataFrame
+        # Create a DataFrame for combined signals
         combined_signals_df = pd.DataFrame({
             'Final_Buy_Signal': final_buy_signal,
             'Final_Sell_Signal': final_sell_signal
         }, index=df.index)
 
+        # Return the combined DataFrame with buy and sell signals
+        print(f"Signals for {symbol} ({data_source}):")
+        print(combined_signals_df.tail())  # Print the last few rows for demonstration
+
         return combined_signals_df
-        
+
     def macd(self, df):
 
         try:
@@ -525,7 +534,7 @@ class Strategy:
         return signals_df
 
         
-    def rsi(self, df):
+    def rsi(self, df, Upper_Band=60, Lower_Band=30):
         """
         Calculates the Relative Strength Index (RSI) signals.
         
@@ -536,8 +545,8 @@ class Strategy:
         Returns:
             tuple: The buy and sell signals.
         """
-        buy_signals = (df['RSI'] < 30) & (df['RSI'].shift(1) >= 30)
-        sell_signals = (df['RSI'] > 70) & (df['RSI'].shift(1) <= 70)
+        buy_signals = (df['RSI'] < Lower_Band) & (df['RSI'].shift(1) >= Lower_Band)
+        sell_signals = (df['RSI'] > Upper_Band) & (df['RSI'].shift(1) <= Upper_Band)
         signals_df = pd.DataFrame({
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
@@ -654,66 +663,61 @@ class Strategy:
 
         return signals_df
 
+
+
     def parabolic_sar(self, df, step=0.02, max_step=0.2):
         """
-        Calculates the Parabolic SAR signals.
+        Calculates the Parabolic SAR signals using Pandas and NumPy for more efficient computation.
         
         Args:
-            df (pd.DataFrame): The historical price data.
+            df (pd.DataFrame): The historical price data with 'High', 'Low', and 'Close' columns.
             step (float): The acceleration factor step.
             max_step (float): The maximum acceleration factor.
             
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
-        # Initialize variables
-        df['PSAR'] = df['Close']
-        df['PSAR_Trend'] = 'Up'
-
-        # Buy and sell signals
-        buy_signals = []
-        sell_signals = []
-
-        # Initial setup for first PSAR value
-        trend = 'Up'
-        sar = df['Low'][0]  # Starting point for SAR in an uptrend
-        ep = df['High'][0]  # Starting extreme point
+        # Initialize arrays
+        psar = np.zeros(len(df))  # Parabolic SAR array
+        trend = np.zeros(len(df))  # Track the trend: 1 for Up, -1 for Down
         af = step  # Initial acceleration factor
+        ep = df['High'].iloc[0]  # Starting extreme point (for Uptrend)
+        
+        # Start with an Uptrend
+        psar[0] = df['Low'].iloc[0]
+        trend[0] = 1  # 1 for Uptrend
+        
+        buy_signals = np.zeros(len(df), dtype=bool)
+        sell_signals = np.zeros(len(df), dtype=bool)
 
         for i in range(1, len(df)):
-            if trend == 'Up':
-                sar = sar + af * (ep - sar)
-                if df['Low'][i] < sar:
-                    trend = 'Down'
-                    sar = ep
-                    ep = df['Low'][i]
-                    af = step
-                    sell_signals.append(True)
-                    buy_signals.append(False)
+            # Update PSAR based on current trend
+            if trend[i - 1] == 1:  # Uptrend
+                psar[i] = psar[i - 1] + af * (ep - psar[i - 1])
+                if df['Low'].iloc[i] < psar[i]:  # Reversal to downtrend
+                    trend[i] = -1  # Switch to downtrend
+                    psar[i] = ep  # Set SAR to previous extreme point
+                    ep = df['Low'].iloc[i]  # Reset extreme point
+                    af = step  # Reset acceleration factor
+                    sell_signals[i] = True  # Mark sell signal
                 else:
-                    buy_signals.append(False)
-                    sell_signals.append(False)
-                    if df['High'][i] > ep:
-                        ep = df['High'][i]
-                        af = min(af + step, max_step)
-            elif trend == 'Down':
-                sar = sar + af * (ep - sar)
-                if df['High'][i] > sar:
-                    trend = 'Up'
-                    sar = ep
-                    ep = df['High'][i]
-                    af = step
-                    buy_signals.append(True)
-                    sell_signals.append(False)
+                    if df['High'].iloc[i] > ep:  # New extreme point
+                        ep = df['High'].iloc[i]
+                        af = min(af + step, max_step)  # Increase acceleration factor
+            else:  # Downtrend
+                psar[i] = psar[i - 1] + af * (ep - psar[i - 1])
+                if df['High'].iloc[i] > psar[i]:  # Reversal to uptrend
+                    trend[i] = 1  # Switch to uptrend
+                    psar[i] = ep  # Set SAR to previous extreme point
+                    ep = df['High'].iloc[i]  # Reset extreme point
+                    af = step  # Reset acceleration factor
+                    buy_signals[i] = True  # Mark buy signal
                 else:
-                    buy_signals.append(False)
-                    sell_signals.append(False)
-                    if df['Low'][i] < ep:
-                        ep = df['Low'][i]
-                        af = min(af + step, max_step)
-            df['PSAR'][i] = sar
-            df['PSAR_Trend'][i] = trend
+                    if df['Low'].iloc[i] < ep:  # New extreme point
+                        ep = df['Low'].iloc[i]
+                        af = min(af + step, max_step)  # Increase acceleration factor
 
+        # Create the result DataFrame
         signals_df = pd.DataFrame({
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
