@@ -38,7 +38,7 @@ def run_trading_while_market_is_open(fivem=300):
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             try:
-                data = scraping.get_stock_data(symbol , interval=timeframe[0], period='max', return_flags={
+                data = scraping.get_stock_data('AAPL' , interval=timeframe[0], period='max', return_flags={
                                                                     'DF': True,
                                                                     'MAX_KEY': False,
                                                                     'SUMMERY': False,
@@ -51,7 +51,7 @@ def run_trading_while_market_is_open(fivem=300):
 
             stock = strategy.Strategy( **data['INFO'])
 
-            print(stock.detect_signals_multithread(data['DF']))
+            # print(stock.detect_signals_multithread(data['DF']))
 
             # # Assuming 'df' is your DataFrame and 'strategy_func' is the strategy function
             # for st in ['rsi', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
@@ -59,10 +59,14 @@ def run_trading_while_market_is_open(fivem=300):
 
                             # , 'parabolic_sar', 'ma', 'macd', 'atr_breakout',
 
-            # best_strategy, best_performance, best_risk_metrics = stock.get_strategy_func()
+            best_strategy, backtest_res = stock.get_strategy_func()
 
-            # print(f"Best Strategy: {best_strategy}, Best Performance: {best_performance}, Best Risk Metrics: {best_risk_metrics}")
+            
+            # s = stock.detect_signals_multithread(data['DF'])['ma']
 
+            # print(s)
+
+            # print(stock.backtest_strategy(data['DF'], s, 'ma'))
 
             break
             # print(df)

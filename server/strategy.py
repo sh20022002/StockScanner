@@ -145,7 +145,7 @@ class Strategy:
     
 
 
-    def get_strategy_func(self, timeframe='1h', num_threads=5):
+    def get_strategy_func(self, timeframe='1m', num_threads=5):
         """
         Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
         
@@ -157,10 +157,10 @@ class Strategy:
             tuple: The best strategy function, along with its performance and risk metrics.
         """
 
-        def backtest_strategy_task(strategy_func):
+        def backtest_strategy_task(df, signals_df, strategy_func):
             try:
                 # Call the existing backtest_strategy method for the current strategy
-                performance, risk_metrics = self.backtest_strategy(df, strategy_func, self.sector, 
+                performance, risk_metrics = self.backtest_strategy(df, signals_df, 
                                                                 stop_loss_percent=self.loss_percent, 
                                                                 stop_profit_percent=self.profit_percent)
                 return strategy_func, performance, risk_metrics
@@ -171,24 +171,20 @@ class Strategy:
         best_strategy = None
         best_performance = float('-inf')  # Initialize with very low performance
         best_risk_metrics = None
-
-        # List of strategy functions to evaluate
-        strategy_functions = ['macd', 'rsi', 'ma', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
-                            'donchian_channel', 'atr_breakout', 'parabolic_sar', 'stochastic_oscillator', 'ema_crossover', 'combined']
-
-
+        backtest_res = []
+        
         # Fetch stock data for backtesting
         try:
-            df = scraping.get_stock_data(self.symbol, DAYS=730, interval=timeframe)
+            df = scraping.get_stock_data(self.symbol, period='max', interval=timeframe)
             df = df['DF']
+            res = self.detect_signals_multithread(df)
         except Exception as e:
             print(f"Error fetching data for {self.symbol}: {e}")
             return None, None, None
 
-
-        # Run the strategy backtests concurrently using ThreadPoolExecutor
+# Run the strategy backtests concurrently using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = {executor.submit(backtest_strategy_task, func): func for func in strategy_functions}
+            futures = {executor.submit(backtest_strategy_task, df, signals, strategy_name): signals for strategy_name, signals in res.items()}
 
             # Iterate over completed futures and get results
             for future in as_completed(futures):
@@ -199,19 +195,21 @@ class Strategy:
                     if performance is None:
                         continue
 
+                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics})
+
                     # Check if this strategy has the best performance
                     if performance > best_performance:
                         best_performance = performance
                         best_strategy = strategy_func
                         best_risk_metrics = risk_metrics
-                    print(f"Strategy: {strategy_func}, Performance: {performance}, \n Risk Metrics: {risk_metrics}")
+                    # print(f"Strategy: {strategy_func}, Performance: {performance}, \n Risk Metrics: {risk_metrics}")
         
-        return best_strategy, best_performance, best_risk_metrics
+        return best_strategy, backtest_res
 
         
 
 
-    def backtest_strategy(self, df, strategy_func, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=5, stop_profit_percent=5):
+    def backtest_strategy(self,df , signals_df, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=None, stop_profit_percent=None):
         """
         Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
         
@@ -240,53 +238,7 @@ class Strategy:
         highest_price = 0  # Track the highest price since buying for trailing stop-loss
         
         # Get the buy and sell signals from the strategy function
-        try:
-            if strategy_func == 'macd':
-                signals_df = self.macd(df)
-
-            elif strategy_func == 'rsi':
-                signals_df = self.rsi(df)
-
-            elif strategy_func == 'ma':
-                signals_df = self.ma(df)
-
-            elif strategy_func == 'bollinger_bands':
-                signals_df = self.bollinger_bands(df)
-
-            elif strategy_func == 'ema_crossover':
-                signals_df = self.ema_crossover(df)
-            
-            elif strategy_func == 'stochastic_oscillator':
-                signals_df = self.stochastic_oscillator(df)
-
-            elif strategy_func == 'parabolic_sar':
-                signals_df = self.parabolic_sar(df)
-
-            elif strategy_func == 'atr_breakout':
-                signals_df = self.atr_breakout(df)
-
-            elif strategy_func == 'donchian_channel':
-                signals_df = self.donchian_channel(df)
-
-            elif strategy_func == 'ichimoku_cloud':
-                signals_df = self.ichimoku_cloud(df)
-
-            elif strategy_func == 'vwap':
-                signals_df = self.vwap(df)
-
-            elif strategy_func == 'combined':
-                signals_df = self.detect_signals_multithread(df, threshold=3)
-
-            else:
-                raise ValueError(f"Unknown strategy function: {strategy_func}")
-
-        except Exception as e:
-            print(f"Error in strategy function: {e}")
-            return None, None
-        
-        if signals_df is None:
-            return None, None
-
+       
         # Iterate over each row in the DataFrame
         for index, row in signals_df.iterrows():
             current_price = df.loc[index]['Close']
@@ -455,47 +407,52 @@ class Strategy:
         Works with both live stock data and historical stock data.
         
         Args:
-            symbol (str): The stock symbol for which signals should be detected.
-            data_source (str): 'live' for live stock data, 'historical' for historical stock data.
+            df (pd.DataFrame): The stock data for which signals should be detected.
             threshold (int): Minimum number of strategies that must agree to generate a final buy/sell signal.
             
         Returns:
             pd.DataFrame: A DataFrame containing the combined buy and sell signals.
         """
-        # Fetch live or historical stock data based on the data source
-        
         if df is None or df.empty:
-            print(f"No data available for symbol {symbol}")
+            print(f"No data available.")
             return None
 
-        # Define tasks for multithreading
+        # Define tasks for multithreading (pass the functions, not the result of calling them)
         tasks = [
-            ('macd',  self.macd(df)),
-            ('rsi',  self.rsi(df)),
-            ('ma',  self.ma(df)),
-            ('bollinger_bands',  self.bollinger_bands(df)),
-            ('vwap',  self.vwap(df)),
-            ('ichimoku_cloud',  self.ichimoku_cloud(df)),
-            ('donchian_channel',  self.donchian_channel(df)),
-            ('atr_breakout',  self.atr_breakout(df)),
-            ('parabolic_sar',  self.parabolic_sar(df)),
-            ('stochastic_oscillator',  self.stochastic_oscillator(df)),
-            ('ema_crossover',  self.ema_crossover(df))
+            ('macd', self.macd),
+            ('rsi', self.rsi),
+            ('ma', self.ma),
+            ('bollinger_bands', self.bollinger_bands),
+            ('vwap', self.vwap),
+            ('ichimoku_cloud', self.ichimoku_cloud),
+            ('donchian_channel', self.donchian_channel),
+            ('atr_breakout', self.atr_breakout),
+            ('parabolic_sar', self.parabolic_sar),
+            ('stochastic_oscillator', self.stochastic_oscillator),
+            ('ema_crossover', self.ema_crossover)
         ]
 
         # Run all tasks concurrently using multithreading
-        with ThreadPoolExecutor(max_workers=threshold) as executor:
+        with ThreadPoolExecutor() as executor:
             futures = {executor.submit(task[1], df): task[0] for task in tasks}
-            resoults = {future.result(): task for future, task in futures.items()}
+            results = {}
+
+            for future in as_completed(futures):
+                task_name = futures[future]
+                try:
+                    results[task_name] = future.result()
+                except Exception as e:
+                    print(f"Error in strategy {task_name}: {e}")
 
         # Initialize buy and sell signal counters
         buy_signals = pd.Series(0, index=df.index)
         sell_signals = pd.Series(0, index=df.index)
 
         # Combine signals from all strategies
-        for  result_df, future in results.items():
-            buy_signals += result_df['Buy_Signal'].astype(int)
-            sell_signals += result_df['Sell_Signal'].astype(int)
+        for strategy_name, result_df in results.items():
+            if result_df is not None:
+                buy_signals += result_df['Buy_Signal'].astype(int)
+                sell_signals += result_df['Sell_Signal'].astype(int)
 
         # Create final signals based on threshold
         final_buy_signal = buy_signals >= threshold
@@ -503,15 +460,14 @@ class Strategy:
 
         # Create a DataFrame for combined signals
         combined_signals_df = pd.DataFrame({
-            'Final_Buy_Signal': final_buy_signal,
-            'Final_Sell_Signal': final_sell_signal
+            'Buy_Signal': final_buy_signal,
+            'Sell_Signal': final_sell_signal
         }, index=df.index)
 
-        # Return the combined DataFrame with buy and sell signals
-        print(f"Signals for {symbol} ({data_source}):")
-        print(combined_signals_df.tail())  # Print the last few rows for demonstration
+        results['combined'] = combined_signals_df
 
-        return combined_signals_df
+        return results
+
 
     def macd(self, df):
 
