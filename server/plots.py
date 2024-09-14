@@ -3,7 +3,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pandas as pd
 
-def plot_stock(df, stock, columns, show='no', interval='1h'):
+def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     """
     Plots the stock data using Plotly.
 
@@ -20,18 +20,7 @@ def plot_stock(df, stock, columns, show='no', interval='1h'):
         # pass
 
     df['Volume'] = df['Volume'] / 1000000
-            
-    #             # Create a boolean mask for the dates and hours you want to keep
-    # mask = ~(((df['Datetime'].dt.month == 12) & (df['Datetime'].dt.day.isin([24, 25]))) |
-    #         ((df['Datetime'].dt.month == 2) & (df['Datetime'].dt.day == 19)) |
-    #         (df['Datetime'].dt.hour < 9) |
-    #         ((df['Datetime'].dt.hour == 9) & (df['Datetime'].dt.minute < 30)) |
-    #         (df['Datetime'].dt.hour > 16))
-            
-    #             # Apply the mask to the DataFrame
-    # df = df[mask]
-    # # Apply the mask to the DataFrame
-
+   
 
     fig = go.Figure()
     
@@ -51,5 +40,18 @@ def plot_stock(df, stock, columns, show='no', interval='1h'):
                 dict(bounds=["sat", "mon"]),  # hide weekends
                 dict(bounds=[16, 9.5], pattern="hour")  # hide non-trading hours (16:00 to 09:30)
             ])
-    
+
+    if signals is not None:
+        for index, row in signals.iterrows():
+            if row['buy_signal']:
+                fig.add_trace(go.Scatter(x=index, y=df['Close'][index],
+                                        mode='markers',
+                                        marker=dict(size=10, color='green'),
+                                        name=signal['Signal']))
+            if row['sell_signal']:
+                fig.add_trace(go.Scatter(x=index, y=df['Close'][index],
+                                        mode='markers',
+                                        marker=dict(size=10, color='red'),
+                                        name=signal['Signal']))
+        
     return fig

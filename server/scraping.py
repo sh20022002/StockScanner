@@ -82,6 +82,7 @@ def get_stock_data(stock, return_flags={
             
 
     
+
     if return_flags.get('DF', False): 
         # past data
         if period is None:   
@@ -90,7 +91,15 @@ def get_stock_data(stock, return_flags={
         else:
             df = stock_ticker.history(period=period, interval=interval)
         
-        # some intervals have different index name
+        # Ensure the DataFrame is not empty
+        if df.empty:
+            print(f"No data fetched for {stock}.")
+            return {}
+        
+        # Reset index to datetime
+        df.index = pd.to_datetime(df.index)
+        df.index = df.index.tz_localize(None)
+        
         if df.index.name == 'Date':
             df = df.rename_axis('Datetime')
             df.index = pd.to_datetime(df.index)
@@ -99,21 +108,26 @@ def get_stock_data(stock, return_flags={
         if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
             df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
         
-        # add some technical indicators
+
+        # Drop unnecessary columns
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        
+        # Compute required technical indicators
         df['SMA20'] = ta.sma(df['Close'], length=20)
         df['SMA50'] = ta.sma(df['Close'], length=50)
         df['SMA100'] = ta.sma(df['Close'], length=100)
         df['SMA150'] = ta.sma(df['Close'], length=150)
         df['SMA200'] = ta.sma(df['Close'], length=200)
         df['EMA20'] = ta.ema(df['Close'], length=20)
-        df['RSI'] = ta.ema(df['Close'], length=20)
+        df['EMA12'] = ta.ema(df['Close'], length=12)
+        df['EMA26'] = ta.ema(df['Close'], length=26)
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        df['STOCH_%K'], df['STOCH_%D'] = ta.stoch(df['High'], df['Low'], df['Close'], fast_k=14, slow_k=3, slow_d=3)
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
 
-        if interval in ['1m', '1d', '5d', '1wk', '1mo', '3mo']:
-            macd = df.ta.macd(fast=12, slow=26, signal=9)
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_Signal'] = macd['MACDs_12_26_9']
-            df['MACD_Hist'] = macd['MACDh_12_26_9']
-
+     # some intervals have different index name
         
     # return the requested values in return_flags at input
     return_values = {}

@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import scraping  # Assuming this is your module for fetching stock data
+import plots
 
 
 
@@ -163,7 +164,7 @@ class Strategy:
                 performance, risk_metrics = self.backtest_strategy(df, signals_df, 
                                                                 stop_loss_percent=self.loss_percent, 
                                                                 stop_profit_percent=self.profit_percent)
-                return strategy_func, performance, risk_metrics
+                return strategy_func, performance, risk_metrics, df, signals_df
             except Exception as e:
                 print(f"Error in strategy {strategy_func}: {e}")
                 return None
@@ -175,7 +176,7 @@ class Strategy:
         
         # Fetch stock data for backtesting
         try:
-            df = scraping.get_stock_data(self.symbol, period='max', interval=timeframe)
+            df = scraping.get_stock_data(self.symbol, DAYS=7, interval=timeframe)
             df = df['DF']
             res = self.detect_signals_multithread(df)
         except Exception as e:
@@ -190,12 +191,13 @@ class Strategy:
             for future in as_completed(futures):
                 result = future.result()
                 if result:
-                    strategy_func, performance, risk_metrics = result
+                    strategy_func, performance, risk_metrics, df, signals = result
 
                     if performance is None:
                         continue
-
-                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics})
+                    
+                    # fig = plots.plot_stock(df, self.symbol, df.columns, signals=signals, show='no', interval=timeframe)
+                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics, 'df': df, 'signals': signals})
 
                     # Check if this strategy has the best performance
                     if performance > best_performance:
@@ -322,6 +324,7 @@ class Strategy:
             'roi': roi
         }
 
+        # print(f"Performance: {performance}, Risk Metrics: {risk_metrics}")
         return performance, risk_metrics
 
 
@@ -471,6 +474,11 @@ class Strategy:
 
     def macd(self, df):
 
+        required_columns = ['MACD', 'MACD_Signal']
+        if not all(col in df.columns for col in required_columns):
+            print("Required columns for MACD strategy are missing.")
+            return None
+
         try:
             buy_signals = (df['MACD'] > df['MACD_Signal']) & (df['MACD'].shift(1) <= df['MACD_Signal'].shift(1))
 
@@ -534,28 +542,25 @@ class Strategy:
     def bollinger_bands(self, df, window=20, num_std_dev=2):
         """
         Calculates the Bollinger Bands signals.
-        
-        Args:
-            df (pd.DataFrame): The historical price data.
-            window (int): The window period for calculating the moving average.
-            num_std_dev (int): The number of standard deviations for the bands.
-            
-        Returns:
-            tuple: The buy and sell signals.
         """
-        
+
+        # Calculate Bollinger Bands
         df['STD20'] = df['Close'].rolling(window=window).std()
         df['Upper_Band'] = df['SMA20'] + (df['STD20'] * num_std_dev)
         df['Lower_Band'] = df['SMA20'] - (df['STD20'] * num_std_dev)
+
+        
+        # Generate signals
         buy_signals = (df['Close'] < df['Lower_Band']) & (df['Close'].shift(1) >= df['Lower_Band'].shift(1))
         sell_signals = (df['Close'] > df['Upper_Band']) & (df['Close'].shift(1) <= df['Upper_Band'].shift(1))
+
         signals_df = pd.DataFrame({
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
         }, index=df.index)
-        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-        
+
         return signals_df
+
 
     def ema_crossover(self, df, short_window=12, long_window=26):
         """
@@ -693,6 +698,16 @@ class Strategy:
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
+        if not isinstance(window, int) or window <= 0:
+            raise ValueError(f"Window size must be a positive integer. Received window={window}")
+    
+        if not isinstance(multiplier, (int, float)) or multiplier <= 0:
+            raise ValueError(f"Multiplier must be a positive number. Received multiplier={multiplier}")
+
+        if df.isnull().values.any() or np.isinf(df.values).any():
+            # print("DataFrame contains NaN or infinite values.")
+            df = df.replace([np.inf, -np.inf], np.nan).dropna()
+
         # Calculate True Range (TR)
         df['High_Low'] = df['High'] - df['Low']
         df['High_Close'] = (df['High'] - df['Close'].shift(1)).abs()
