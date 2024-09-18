@@ -33,6 +33,7 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     if(show == 'all'):
         for column in columns:
             fig.add_trace(go.Scatter(x=df.index, y=df[column], name=column))
+
     if interval in ['1m', '1h']:
         fig.update_xaxes(
             rangeslider_visible=True,
@@ -42,16 +43,43 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
             ])
 
     if signals is not None:
-        for index, row in signals.iterrows():
-            if row['buy_signal']:
-                fig.add_trace(go.Scatter(x=index, y=df['Close'][index],
-                                        mode='markers',
-                                        marker=dict(size=10, color='green'),
-                                        name=signal['Signal']))
-            if row['sell_signal']:
-                fig.add_trace(go.Scatter(x=index, y=df['Close'][index],
-                                        mode='markers',
-                                        marker=dict(size=10, color='red'),
-                                        name=signal['Signal']))
-        
+    # Ensure that 'Buy_Signal' and 'Sell_Signal' columns are in the signals DataFrame
+        if 'Buy_Signal' in signals.columns and 'Sell_Signal' in signals.columns:
+            # Extract indices where Buy_Signal is True
+            buy_indices = signals[signals['Buy_Signal'] == True].index
+            buy_prices = df.loc[buy_indices, 'Close']
+
+            # Add green markers for buy signals
+            fig.add_trace(go.Scatter(
+                x=buy_indices,
+                y=buy_prices,
+                mode='markers',
+                marker=dict(size=20, color='green', symbol='triangle-up'),
+                name='Buy Signals'
+            ))
+
+            # Extract indices where Sell_Signal is True
+            sell_indices = signals[signals['Sell_Signal'] == True].index
+            sell_prices = df.loc[sell_indices, 'Close']
+
+            # Add red markers for sell signals
+            fig.add_trace(go.Scatter(
+                x=sell_indices,
+                y=sell_prices,
+                mode='markers',
+                marker=dict(size=20, color='red', symbol='triangle-down'),
+                name='Sell Signals'
+            ))
+        else:
+            print("Signals DataFrame must contain 'Buy_Signal' and 'Sell_Signal' columns.")
+
+    # Update layout for better visualization
+    fig.update_layout(
+        title=f"{stock} Stock Price {interval} Interval",
+        yaxis_title="Price",
+        xaxis_title="Date",
+        legend_title="Legend",
+        xaxis_rangeslider_visible=False  # Hide range slider if not needed
+    )
+
     return fig

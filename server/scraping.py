@@ -21,129 +21,176 @@ def current_stock_price(symbol):
     df = yf.Ticker(symbol).history(period='1h')
     return df['Close'].iloc[-1]
 
-def get_stock_data(stock, return_flags={
-                                        'DF': True,
-                                        'MAX_KEY': False,
-                                        'SUMMERY': False,
-                                        'DIVD': False,
-                                        'INFO': False
-                                        }, DAYS=365, interval='1h', period=None):
 
-    '''- return_flags (dict): A dictionary specifying which return values to include.
-        - DF (bool): If True, include the DataFrame of historical stock data. Default is False.
-        - MAX_KEY (bool): If True, include the maximum recommendation key. Default is False.
-        - SUMMERY (bool): If True, include the long business summary. Default is False.
-        - DIVD (bool): If True, include the last dividend information. Default is False.
-        - INFO (bool): If True, include the stock information. Default is False.
-    
+def get_stock_data(
+    stock,
+    return_flags={
+        'DF': True,
+        'MAX_KEY': False,
+        'SUMMARY': False,
+        'DIVID': False,
+        'INFO': False
+    },
+    DAYS=365,
+    interval='1h',
+    period=None
+):
+    """
     Get historical stock data for a given stock symbol.
 
     Parameters:
     - stock (str): The stock symbol.
+    - return_flags (dict): A dictionary specifying which return values to include.
+        - DF (bool): Include the DataFrame of historical stock data. Default is True.
+        - MAX_KEY (bool): Include the maximum recommendation key. Default is False.
+        - SUMMARY (bool): Include the long business summary. Default is False.
+        - DIVID (bool): Include the last dividend information. Default is False.
+        - INFO (bool): Include the stock information. Default is False.
     - DAYS (int): The number of days of historical data to retrieve. Default is 365.
-    - interval (str): Valid intervals: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo]
-    - period (str): Valid periods: [1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max] used to get current data with 1d interval
+    - interval (str): Valid intervals: ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
+    - period (str): Valid periods: ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max']
 
     Returns:
         dict: A dictionary containing the requested return values.
             - DF (DataFrame): A pandas DataFrame containing the historical stock data.
             - MAX_KEY (str): The maximum recommendation key.
-            - SUMMERY (str): The long business summary.
-            - DIVD (str): The last dividend information.
+            - SUMMARY (str): The long business summary.
+            - DIVID (str): The last dividend information.
             - INFO (dict): The stock information.
-    '''
+    """
+    # Adjust DAYS based on interval limitations
     if interval == '1m' and DAYS > 7:
         DAYS = 7
-    elif interval == '25' and DAYS > 60:
+    elif interval == '2m' and DAYS > 60:
         DAYS = 60
     elif interval == '1h' and DAYS > 729:
         DAYS = 729
 
-    end_date = get_exchange_time()
+    # Fetch current date
+    end_date = datetime.utcnow()
 
-    start_date = end_date - timedelta(DAYS)  # days before the end date
-    stock_ticker = yf.Ticker(stock)
-    
-    if return_flags.get('SUMMERY', False):
-        data = stock_ticker.recommendations
-        summery = stock_ticker.info['longBusinessSummary']
+    # Calculate start date
+    start_date = end_date - timedelta(days=DAYS)
 
-    info = stock_ticker.info
+    # Initialize return values dictionary
+    return_values = {}
 
+    try:
+        stock_ticker = yf.Ticker(stock)
+    except Exception as e:
+        print(f"Error fetching data for {stock}: {e}")
+        return return_values
+
+    # Fetch additional info if requested
+    if return_flags.get('SUMMARY', False) or return_flags.get('MAX_KEY', False) or return_flags.get('DIVID', False) or return_flags.get('INFO', False):
+        try:
+            info = stock_ticker.info
+        except Exception as e:
+            print(f"Error fetching info for {stock}: {e}")
+            info = {}
+
+    # Fetch summary
+    if return_flags.get('SUMMARY', False):
+        summary = info.get('longBusinessSummary', 'Summary not available.')
+        return_values['SUMMARY'] = summary
+
+    # Fetch max recommendation key
     if return_flags.get('MAX_KEY', False):
-        max_key = stock_ticker.info['recommendationKey']
+        max_key = info.get('recommendationKey', 'No recommendation key available.')
+        return_values['MAX_KEY'] = max_key
 
-    if return_flags.get('DIVD', False):
-        divid = 'No Dividend'
+    # Fetch dividend information
+    if return_flags.get('DIVID', False):
         last_dividend_date_timestamp = info.get('lastDividendDate')
         if last_dividend_date_timestamp:
             last_dividend_date = datetime.fromtimestamp(last_dividend_date_timestamp)
-            divid = f"{last_dividend_date.strftime('%Y-%m-%d')} : {info.get('lastDividendValue')} $"
-            
-
-    
-
-    if return_flags.get('DF', False): 
-        # past data
-        if period is None:   
-            df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
-        # current data
+            last_dividend_value = info.get('lastDividendValue', 0)
+            divid = f"{last_dividend_date.strftime('%Y-%m-%d')} : {last_dividend_value} $"
         else:
-            df = stock_ticker.history(period=period, interval=interval)
-        
+            divid = 'No Dividend'
+        return_values['DIVID'] = divid
+
+    # Fetch stock info
+    if return_flags.get('INFO', False):
+        return_values['INFO'] = info
+
+    # Fetch historical data
+    if return_flags.get('DF', False):
+        try:
+            if period is None:
+                df = stock_ticker.history(start=start_date, end=end_date, interval=interval)
+            else:
+                df = stock_ticker.history(period=period, interval=interval)
+        except Exception as e:
+            print(f"Error fetching historical data for {stock}: {e}")
+            return return_values
+
         # Ensure the DataFrame is not empty
         if df.empty:
             print(f"No data fetched for {stock}.")
-            return {}
-        
-        # Reset index to datetime
+            return return_values
+
+        # Reset index to datetime and handle timezone
         df.index = pd.to_datetime(df.index)
         df.index = df.index.tz_localize(None)
-        
-        if df.index.name == 'Date':
-            df = df.rename_axis('Datetime')
-            df.index = pd.to_datetime(df.index)
 
-        # drop columns that are not needed but some intervals don't have them
-        if 'Dividends' in df.columns and 'Stock Splits' in df.columns:
-            df.drop(columns=['Dividends','Stock Splits'], inplace=True)    
-        
+        # Rename index if necessary
+        if df.index.name != 'Datetime':
+            df.index.name = 'Datetime'
 
-        # Drop unnecessary columns
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        
-        # Compute required technical indicators
-        df['SMA20'] = ta.sma(df['Close'], length=20)
-        df['SMA50'] = ta.sma(df['Close'], length=50)
-        df['SMA100'] = ta.sma(df['Close'], length=100)
-        df['SMA150'] = ta.sma(df['Close'], length=150)
-        df['SMA200'] = ta.sma(df['Close'], length=200)
-        df['EMA20'] = ta.ema(df['Close'], length=20)
-        df['EMA12'] = ta.ema(df['Close'], length=12)
-        df['EMA26'] = ta.ema(df['Close'], length=26)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-        df['STOCH_%K'], df['STOCH_%D'] = ta.stoch(df['High'], df['Low'], df['Close'], fast_k=14, slow_k=3, slow_d=3)
-        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+        # Drop unnecessary columns if they exist
+        columns_to_drop = [col for col in ['Dividends', 'Stock Splits'] if col in df.columns]
+        if columns_to_drop:
+            df.drop(columns=columns_to_drop, inplace=True)
 
-     # some intervals have different index name
-        
-    # return the requested values in return_flags at input
-    return_values = {}
-    if return_flags.get('DF', False):
+        # Ensure required columns are present
+        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            print(f"Missing columns in data: {missing_columns}")
+            return return_values
+
+        # Select required columns
+        df = df[required_columns]
+
+        # Handle duplicate indices
+        if df.index.has_duplicates:
+            df = df[~df.index.duplicated(keep='first')]
+
+        # Ensure the index is sorted
+        df.sort_index(inplace=True)
+
+        # Compute technical indicators
+        try:
+            df['SMA20'] = ta.sma(df['Close'], length=20)
+            df['SMA50'] = ta.sma(df['Close'], length=50)
+            df['SMA100'] = ta.sma(df['Close'], length=100)
+            df['SMA150'] = ta.sma(df['Close'], length=150)
+            df['SMA200'] = ta.sma(df['Close'], length=200)
+            df['EMA20'] = ta.ema(df['Close'], length=20)
+            df['EMA12'] = ta.ema(df['Close'], length=12)
+            df['EMA26'] = ta.ema(df['Close'], length=26)
+            df['RSI'] = ta.rsi(df['Close'], length=14)
+            macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+            df['MACD'] = macd['MACD_12_26_9']
+            df['MACD_Signal'] = macd['MACDs_12_26_9']
+            df['MACD_Hist'] = macd['MACDh_12_26_9']
+            df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+            stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3, smooth_k=3)
+            df['STOCH_%K'] = stoch['STOCHk_14_3_3']
+            df['STOCH_%D'] = stoch['STOCHd_14_3_3']
+            df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+        except Exception as e:
+            print(f"Error computing technical indicators for {stock}: {e}")
+            return return_values
+
+        # Handle NaN values resulting from calculations
+        # df.dropna(inplace=True)
+
+        # Return the DataFrame
         return_values['DF'] = df
-    if return_flags.get('MAX_KEY', False):
-        return_values['MAX_KEY'] = max_key  
-    if return_flags.get('SUMMERY', False):
-        return_values['SUMMERY'] = summery  
-    if return_flags.get('DIVD', False):
-        return_values['DIVD'] = divd  
-    if return_flags.get('INFO', False):
-        return_values['INFO'] = info  
 
     return return_values
-
 
 def get_tickers():
     '''
@@ -290,4 +337,3 @@ def easter_monday(year):
         return easter_sunday + timedelta(days=1)
 
 
-   

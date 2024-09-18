@@ -30,7 +30,7 @@ def run_trading_while_market_is_open(fivem=300):
     signal_stack = strategy.SignalStack()
     timeframe = ['1d', '1h', '1m']
 
-    while not scraping.is_nyse_open():  
+    while True: #scraping.is_nyse_open():  
 
         for symbol in scraping.get_tickers():
 
@@ -38,7 +38,7 @@ def run_trading_while_market_is_open(fivem=300):
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             try:
-                data = scraping.get_stock_data(symbol , interval=timeframe[2], period='max', return_flags={
+                data = scraping.get_stock_data('AAPL' , interval=timeframe[2], period='max', return_flags={
                                                                     'DF': True,
                                                                     'MAX_KEY': False,
                                                                     'SUMMERY': False,
@@ -50,7 +50,13 @@ def run_trading_while_market_is_open(fivem=300):
                 continue
 
             stock = strategy.Strategy( **data['INFO'])
-            # print(stock.backtest_strategy(data['DF'], stock.detect_signals_multithread(data['DF'])['ma'], 'ma'))
+            df = data['DF']
+            res = stock.detect_signals_multithread(df)
+            print(df.index.min(), 'df')
+            # print(res.index.tz)
+            for n, d in res.items():
+                print(d.index.min(), n)
+
 
 
             # print(stock.detect_signals_multithread(data['DF']))
@@ -61,25 +67,15 @@ def run_trading_while_market_is_open(fivem=300):
 
                             # , 'parabolic_sar', 'ma', 'macd', 'atr_breakout',
             # print(timeframe[0])
-            best_strategy, backtest_res = stock.get_strategy_func(timeframe=timeframe[2])
+            # best_strategy, backtest_res = stock.get_strategy_func(timeframe=timeframe[2], )
 
-            for res in backtest_res:
-                if res['strategy_func'] == best_strategy:
-                    print('best')
-                print(f"Strategy: {res['strategy_func']}, 'performance': {res['performance']}, risk_metrics: {res['risk_metrics']}")
+            # for res in backtest_res:
+                # if res['strategy_func'] == best_strategy:
+                    # print('best')
+                # print(f"Strategy: {res['strategy_func']}, 'performance': {res['performance']}, risk_metrics: {res['risk_metrics']}")
+                # res['strategy_func']['fig'].show()
 
-            print(best_strategy)
-
-            # print(f"Best Strategy: {best_strategy}, 'performance': {backtest_res[best_strategy][performance]}, risk_metrics: {backtest_res[best_strategy][risk_metrics]}")
-
-            # backtest_res[best_strategy]['fig'].show()
             
-            # s = stock.detect_signals_multithread(data['DF'])['ma']
-
-            # print(s)
-
-            # print(stock.backtest_strategy(data['DF'], s, 'ma'))
-
             break
             # print(df)
             # for date, (buy_signal, sell_signal) in zip(data['DF'].index, zip(buy_signals, sell_signals)):
