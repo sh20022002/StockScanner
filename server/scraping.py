@@ -26,6 +26,7 @@ def get_stock_data(
     stock,
     return_flags={
         'DF': True,
+        'INDICATORS': True,
         'MAX_KEY': False,
         'SUMMARY': False,
         'DIVID': False,
@@ -157,30 +158,31 @@ def get_stock_data(
 
         # Ensure the index is sorted
         df.sort_index(inplace=True)
-
-        # Compute technical indicators
-        try:
-            df['SMA20'] = ta.sma(df['Close'], length=20)
-            df['SMA50'] = ta.sma(df['Close'], length=50)
-            df['SMA100'] = ta.sma(df['Close'], length=100)
-            df['SMA150'] = ta.sma(df['Close'], length=150)
-            df['SMA200'] = ta.sma(df['Close'], length=200)
-            df['EMA20'] = ta.ema(df['Close'], length=20)
-            df['EMA12'] = ta.ema(df['Close'], length=12)
-            df['EMA26'] = ta.ema(df['Close'], length=26)
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_Signal'] = macd['MACDs_12_26_9']
-            df['MACD_Hist'] = macd['MACDh_12_26_9']
-            df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-            stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3, smooth_k=3)
-            df['STOCH_%K'] = stoch['STOCHk_14_3_3']
-            df['STOCH_%D'] = stoch['STOCHd_14_3_3']
-            df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
-        except Exception as e:
-            print(f"Error computing technical indicators for {stock}: {e}")
-            return return_values
+        if return_flags.get('INDICATORS', False):
+       
+            # Compute technical indicators
+            try:
+                df['SMA20'] = ta.sma(df['Close'], length=20)
+                df['SMA50'] = ta.sma(df['Close'], length=50)
+                df['SMA100'] = ta.sma(df['Close'], length=100)
+                df['SMA150'] = ta.sma(df['Close'], length=150)
+                df['SMA200'] = ta.sma(df['Close'], length=200)
+                df['EMA20'] = ta.ema(df['Close'], length=20)
+                df['EMA12'] = ta.ema(df['Close'], length=12)
+                df['EMA26'] = ta.ema(df['Close'], length=26)
+                df['RSI'] = ta.rsi(df['Close'], length=14)
+                macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+                df['MACD'] = macd['MACD_12_26_9']
+                df['MACD_Signal'] = macd['MACDs_12_26_9']
+                df['MACD_Hist'] = macd['MACDh_12_26_9']
+                df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+                stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3, smooth_k=3)
+                df['STOCH_%K'] = stoch['STOCHk_14_3_3']
+                df['STOCH_%D'] = stoch['STOCHd_14_3_3']
+                df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+            except Exception as e:
+                print(f"Error computing technical indicators for {stock}: {e}")
+                return return_values
 
         # Return the DataFrame
         return_values['DF'] = df

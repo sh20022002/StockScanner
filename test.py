@@ -103,6 +103,7 @@ class Strategy:
         if 'Date' in df.columns:
             df.set_index('Date', inplace=True)
 
+        df.index = df.index.tz_localize(None)
         # MACD
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
         # RSI
@@ -130,18 +131,20 @@ class Strategy:
 
         return df
 
-    def get_strategy_func(self, timeframe='1h', num_threads=5):
-        """
-        Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
-        """
-        def backtest_strategy_task(strategy_func_name):
+    def backtest_strategy_task(self, df, strategy_func_name):
             try:
                 strategy_func = getattr(self, strategy_func_name)
-                performance, risk_metrics = self.backtest_strategy(df.copy(), strategy_func)
+                performance, risk_metrics = self.backtest_strategy(df, strategy_func)
                 return strategy_func_name, performance, risk_metrics
             except Exception as e:
                 print(f"Error in strategy {strategy_func_name}: {e}")
                 return None
+
+    def get_strategy_func(self, timeframe='1h', num_threads=5):
+        """
+        Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
+        """
+        
 
         best_strategy = None
         best_performance = float('-inf')  # Initialize with very low performance
@@ -161,7 +164,7 @@ class Strategy:
 
         # Run the strategy backtests concurrently using multiprocessing
         with multiprocessing.Pool(processes=num_threads) as pool:
-            results = pool.map(backtest_strategy_task, strategy_functions)
+            results = pool.map(self.backtest_strategy_task, df.copy(), strategy_functions)
 
         # Iterate over results
         for result in results:
