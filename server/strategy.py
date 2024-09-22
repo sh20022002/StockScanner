@@ -537,14 +537,7 @@ class Strategy:
             return None
     
         
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
 
         
     def rsi(self, df, Upper_Band=60, Lower_Band=30):
@@ -560,14 +553,9 @@ class Strategy:
         """
         buy_signals = (df['RSI'] < Lower_Band) & (df['RSI'].shift(1) >= Lower_Band)
         sell_signals = (df['RSI'] > Upper_Band) & (df['RSI'].shift(1) <= Upper_Band)
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-        
-        return signals_df
 
+        return generate_signal(sell_signals, buy_signals, df.index)
+        
     def ma(self, df):
         """
         Calculates the Moving Average (MA) signals.
@@ -580,13 +568,8 @@ class Strategy:
         """
         buy_signals = (df['SMA20'] > df['SMA150']) & (df['SMA20'].shift(1) <= df['SMA150'].shift(1))
         sell_signals = (df['SMA20'] < df['SMA150']) & (df['SMA20'].shift(1) >= df['SMA150'].shift(1))
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-
-        return signals_df
+       
+        return generate_signal(sell_signals, buy_signals, df.index)
 
     def bollinger_bands(self, df, window=20, num_std_dev=2):
         """
@@ -595,6 +578,9 @@ class Strategy:
 
         # Calculate Bollinger Bands
         df['STD20'] = df['Close'].rolling(window=window).std()
+
+        df.dropna(subset=['SMA20', 'STD20'], inplace=True)
+
         df['Upper_Band'] = df['SMA20'] + (df['STD20'] * num_std_dev)
         df['Lower_Band'] = df['SMA20'] - (df['STD20'] * num_std_dev)
 
@@ -603,12 +589,7 @@ class Strategy:
         buy_signals = (df['Close'] < df['Lower_Band']) & (df['Close'].shift(1) >= df['Lower_Band'].shift(1))
         sell_signals = (df['Close'] > df['Upper_Band']) & (df['Close'].shift(1) <= df['Upper_Band'].shift(1))
 
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
 
 
     def ema_crossover(self, df):
@@ -621,18 +602,13 @@ class Strategy:
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
-        # Calculate short-term and long-term EMAs
-        
+        df.dropna(subset=['EMA12', 'EMA26'], inplace=True)
+
         # Generate buy and sell signals
         buy_signals = (df['EMA12'] > df['EMA26']) & (df['EMA12'].shift(1) <= df['EMA26'].shift(1))
         sell_signals = (df['EMA12'] < df['EMA26']) & (df['EMA12'].shift(1) >= df['EMA26'].shift(1))
 
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
 
     def stochastic_oscillator(self, df, k_window=14, d_window=3, overbought=80, oversold=20):
         """
@@ -654,58 +630,67 @@ class Strategy:
         if not isinstance(d_window, int) or d_window <= 0:
             raise ValueError(f"d_window must be a positive integer. Received d_window={d_window}")
 
+        # Ensure required columns exist
+        required_columns = ['High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_columns):
+            print(f"DataFrame must contain {required_columns} columns.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+
         # Ensure sufficient data length
         required_length = max(k_window, d_window)
         if len(df) < required_length:
             print(f"Insufficient data for Stochastic Oscillator calculation. Required: {required_length}, Available: {len(df)}")
             return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
+        # Sort the DataFrame by index to ensure chronological order
+        df.sort_index(inplace=True)
+
         # Calculate %K (stochastic)
-        df['Low_K'] = df['Low'].rolling(window=k_window, min_periods=1).min()
-        df['High_K'] = df['High'].rolling(window=k_window, min_periods=1).max()
-        df['Denominator'] = df['High_K'] - df['Low_K']
+        df['Lowest_Low'] = df['Low'].rolling(window=k_window, min_periods=1).min().astype('float32')
+        df['Highest_High'] = df['High'].rolling(window=k_window, min_periods=1).max().astype('float32')
+        df['Denominator'] = (df['Highest_High'] - df['Lowest_Low']).astype('float32')
+
         # Avoid division by zero
         df['Denominator'].replace(0, np.nan, inplace=True)
-        df['%K'] = ((df['Close'] - df['Low_K']) / df['Denominator']) * 100
+        df['%K'] = (((df['Close'] - df['Lowest_Low']) / df['Denominator']) * 100).astype('float32')
         df['%K'].fillna(0, inplace=True)  # Handle NaN values resulting from division by zero
 
         # Calculate %D (signal line)
-        df['%D'] = df['%K'].rolling(window=d_window, min_periods=1).mean()
+        df['%D'] = df['%K'].rolling(window=d_window, min_periods=1).mean().astype('float32')
 
         # Generate buy and sell signals
         buy_signals = (df['%K'] < oversold) & (df['%K'].shift(1) >= oversold)
         sell_signals = (df['%K'] > overbought) & (df['%K'].shift(1) <= overbought)
 
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
         # Clean up temporary columns
-        df.drop(columns=['Low_K', 'High_K', 'Denominator', '%K', '%D'], inplace=True)
+        df.drop(columns=['Lowest_Low', 'Highest_High', 'Denominator', '%K', '%D'], inplace=True)
 
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
+
 
 
 
 
     def parabolic_sar(self, df, step=0.02, max_step=0.2):
-        """
-        Calculates the Parabolic SAR signals using Pandas and NumPy for more efficient computation.
+        # Ensure DataFrame is not empty and has at least two rows
+        if df is None or df.empty or len(df) < 2:
+            print("DataFrame must contain at least two rows for Parabolic SAR calculation.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
         
-        Args:
-            df (pd.DataFrame): The historical price data with 'High', 'Low', and 'Close' columns.
-            step (float): The acceleration factor step.
-            max_step (float): The maximum acceleration factor.
-            
-        Returns:
-            pd.DataFrame: The buy and sell signals.
-        """
+        # Ensure required columns exist
+        required_columns = ['High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_columns):
+            print(f"DataFrame must contain {required_columns} columns for Parabolic SAR calculation.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+        
+        # Sort the DataFrame by index to ensure chronological order
+        df.sort_index(inplace=True)
+        
         # Initialize arrays
-        psar = np.zeros(len(df))  # Parabolic SAR array
-        trend = np.zeros(len(df))  # Track the trend: 1 for Up, -1 for Down
-        af = step  # Initial acceleration factor
-        ep = df['High'].iloc[0]  # Starting extreme point (for Uptrend)
+        psar = np.zeros(len(df))
+        trend = np.zeros(len(df))
+        af = step
+        ep = df['High'].iloc[0]
         
         # Start with an Uptrend
         psar[0] = df['Low'].iloc[0]
@@ -725,6 +710,7 @@ class Strategy:
                     af = step  # Reset acceleration factor
                     sell_signals[i] = True  # Mark sell signal
                 else:
+                    trend[i] = 1  # Continue uptrend
                     if df['High'].iloc[i] > ep:  # New extreme point
                         ep = df['High'].iloc[i]
                         af = min(af + step, max_step)  # Increase acceleration factor
@@ -737,17 +723,12 @@ class Strategy:
                     af = step  # Reset acceleration factor
                     buy_signals[i] = True  # Mark buy signal
                 else:
+                    trend[i] = -1  # Continue downtrend
                     if df['Low'].iloc[i] < ep:  # New extreme point
                         ep = df['Low'].iloc[i]
                         af = min(af + step, max_step)  # Increase acceleration factor
 
-        # Create the result DataFrame
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
 
     def atr_breakout(self, df, window=14, multiplier=1.2):
         """
@@ -764,31 +745,17 @@ class Strategy:
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
-     
-        # if not isinstance(window, int) or window <= 0:
-        #     raise ValueError(f"Window size must be a positive integer. Received window={window}")
-    
-        # if not isinstance(multiplier, (int, float)) or multiplier <= 0:
-        #     raise ValueError(f"Multiplier must be a positive number. Received multiplier={multiplier}")
-
-        # if df.isnull().values.any() or np.isinf(df.values).any():
-        #     print("DataFrame contains NaN or infinite values.")
-        #     df = df.replace([np.inf, -np.inf], np.nan).dropna()
+        if df['ATR'].isnull().any():
+            df['ATR'].fillna(method='bfill', inplace=True)
 
         # Calculate breakout levels
         df['Upper_Breakout'] = df['Close'] + (df['ATR'] * multiplier)
         df['Lower_Breakout'] = df['Close'] - (df['ATR'] * multiplier)
 
         # Generate buy and sell signals
-        buy_signals = (df['Close'] > df['Upper_Breakout'])
-        sell_signals = (df['Close'] < df['Lower_Breakout'])
-
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        return signals_df
+        buy_signals = (df['Close'] > df['Upper_Breakout'].shift(1))
+        sell_signals = (df['Close'] < df['Lower_Breakout'].shift(1))
+        return generate_signal(sell_signals, buy_signals, df.index)
 
     def donchian_channel(self, df, window=20):
         """
@@ -801,9 +768,15 @@ class Strategy:
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
-        # Parameter validation
+            # Parameter validation
         if not isinstance(window, int) or window <= 0:
             raise ValueError(f"window must be a positive integer. Received window={window}")
+
+        # Ensure required columns exist
+        required_columns = ['High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_columns):
+            print(f"DataFrame must contain {required_columns} columns.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
         # Ensure sufficient data length
         if len(df) < window:
@@ -814,17 +787,20 @@ class Strategy:
         df['Donchian_High'] = df['High'].rolling(window=window).max()
         df['Donchian_Low'] = df['Low'].rolling(window=window).min()
 
+        # Drop NaN values resulting from rolling calculations
+        df.dropna(subset=['Donchian_High', 'Donchian_Low'], inplace=True)
+
+        # Ensure DataFrame is not empty after dropna
+        if df.empty:
+            print("DataFrame is empty after dropping NaN values.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+
         # Generate buy and sell signals
         buy_signals = (df['Close'] > df['Donchian_High'].shift(1))
         sell_signals = (df['Close'] < df['Donchian_Low'].shift(1))
 
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
 
-        return signals_df
-
+        return generate_signal(sell_signals, buy_signals, df.index)
 
 
     def ichimoku_cloud(self, df, conversion_window=9, base_window=26, leading_span_window=52):
@@ -840,12 +816,21 @@ class Strategy:
         Returns:
             pd.DataFrame: The buy and sell signals.
         """
+        if df.empty or len(df) < conversion_window:
+            raise ValueError("Insufficient data for the calculation.")
+
         # Parameter validation
         for param_name, param_value in [('conversion_window', conversion_window),
                                         ('base_window', base_window),
                                         ('leading_span_window', leading_span_window)]:
             if not isinstance(param_value, int) or param_value <= 0:
                 raise ValueError(f"{param_name} must be a positive integer. Received {param_name}={param_value}")
+
+        # Ensure required columns exist
+        required_columns = ['High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_columns):
+            print(f"DataFrame must contain {required_columns} columns.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
         # Ensure sufficient data length
         max_window = max(conversion_window, base_window, leading_span_window)
@@ -862,27 +847,26 @@ class Strategy:
         df['Lagging_Span'] = df['Close'].shift(-base_window)
 
         # Drop rows with NaN values resulting from rolling calculations
-        # df.dropna(subset=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B'], inplace=True)
+        df.dropna(subset=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B'], inplace=True)
+
+        # Ensure DataFrame is not empty after dropping NaN values
+        if df.empty:
+            print("DataFrame is empty after dropping NaN values.")
+            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
         # Buy signals when price crosses above the cloud
-        buy_signals = (df['Close'] > df['Leading_Span_A']) & \
-                    (df['Close'] > df['Leading_Span_B']) & \
-                    (df['Close'].shift(1) <= df['Leading_Span_A'])
+        buy_signals = (df['Close'] > df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1)) & \
+                    (df['Close'].shift(1) <= df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1).shift(1))
 
         # Sell signals when price crosses below the cloud
-        sell_signals = (df['Close'] < df['Leading_Span_A']) & \
-                    (df['Close'] < df['Leading_Span_B']) & \
-                    (df['Close'].shift(1) >= df['Leading_Span_A'])
+        sell_signals = (df['Close'] < df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1)) & \
+                    (df['Close'].shift(1) >= df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1).shift(1))
 
-        signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=df.index)
 
         # Clean up temporary columns
-        # df.drop(columns=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B', 'Lagging_Span'], inplace=True)
+        df.drop(columns=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B', 'Lagging_Span'], inplace=True)
 
-        return signals_df
+        return generate_signal(sell_signals, buy_signals, df.index)
 
     def vwap(self, df):
         """
@@ -903,9 +887,14 @@ class Strategy:
         buy_signals = (df['Close'] > df['VWAP']) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
         sell_signals = (df['Close'] < df['VWAP']) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
 
-        signals_df = pd.DataFrame({
+        return generate_signal(sell_signals, buy_signals, df.index)
+
+def generate_signal(sell_signals, buy_signals, indexs):
+
+    signals_df = pd.DataFrame({
             'Buy_Signal': buy_signals,
             'Sell_Signal': sell_signals
-        }, index=df.index)
-
-        return signals_df
+        }, index=indexs)
+        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
+        
+    return signals_df

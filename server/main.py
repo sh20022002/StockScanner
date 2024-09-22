@@ -40,6 +40,7 @@ def run_trading_while_market_is_open(fivem=300):
             try:
                 data = scraping.get_stock_data(symbol , interval=timeframe[2], period='max', return_flags={
                                                                     'DF': True,
+                                                                    'INDICATORS': True,
                                                                     'MAX_KEY': False,
                                                                     'SUMMERY': False,
                                                                     'DIVD': False,
@@ -49,16 +50,15 @@ def run_trading_while_market_is_open(fivem=300):
                 print(f"Error: {e}")
                 continue
 
-            df = strategy.Strategy( **data['INFO'])['DF']
-            print(df.head())
-            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
-            # for d in backtest_res:
-                # print(d['roi'])
-            # print(best)
-            # for res in backtest_res:
+            stock = strategy.Strategy( **data['INFO'])
+            df = data['DF']
+            # print(df.tail())
+            best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
+            
+            for res in backtest_res:
             #     if res['strategy_func'] == best:
             #         plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
-            #     print(res['performance'], res['risk_metrics'])
+                print(res['performance'], res['risk_metrics'])
                 
             
             
