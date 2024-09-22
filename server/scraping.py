@@ -67,7 +67,7 @@ def get_stock_data(
         DAYS = 729
 
     # Fetch current date
-    end_date = datetime.utcnow()
+    end_date = get_exchange_time()
 
     # Calculate start date
     start_date = end_date - timedelta(days=DAYS)
@@ -130,10 +130,6 @@ def get_stock_data(
             print(f"No data fetched for {stock}.")
             return return_values
 
-        # Reset index to datetime and handle timezone
-        df.index = pd.to_datetime(df.index)
-        df.index = df.index.tz_localize(None)
-
         # Rename index if necessary
         if df.index.name != 'Datetime':
             df.index.name = 'Datetime'
@@ -153,7 +149,9 @@ def get_stock_data(
         # Select required columns
         df = df[required_columns]
 
-        # Handle duplicate indices
+        df.index = df.index.tz_localize(None)
+
+        # # Handle duplicate indices
         if df.index.has_duplicates:
             df = df[~df.index.duplicated(keep='first')]
 
@@ -183,9 +181,6 @@ def get_stock_data(
         except Exception as e:
             print(f"Error computing technical indicators for {stock}: {e}")
             return return_values
-
-        # Handle NaN values resulting from calculations
-        # df.dropna(inplace=True)
 
         # Return the DataFrame
         return_values['DF'] = df
@@ -337,3 +332,5 @@ def easter_monday(year):
         return easter_sunday + timedelta(days=1)
 
 
+if __name__ == '__main__':
+    print(get_stock_data('AAPL')['DF'])

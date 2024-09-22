@@ -54,7 +54,7 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
                 x=buy_indices,
                 y=buy_prices,
                 mode='markers',
-                marker=dict(size=20, color='green', symbol='triangle-up'),
+                marker=dict(size=10, color='green', symbol='triangle-up'),
                 name='Buy Signals'
             ))
 
@@ -67,7 +67,7 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
                 x=sell_indices,
                 y=sell_prices,
                 mode='markers',
-                marker=dict(size=20, color='red', symbol='triangle-down'),
+                marker=dict(size=10, color='red', symbol='triangle-down'),
                 name='Sell Signals'
             ))
         else:

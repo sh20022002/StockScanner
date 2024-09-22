@@ -146,7 +146,7 @@ class Strategy:
     
 
 
-    def get_strategy_func(self, DAYS=365, timeframe='1m', num_threads=5):
+    def get_strategy_func(self, df, timeframe, num_threads=5):
         """
         Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
         
@@ -164,7 +164,7 @@ class Strategy:
                 performance, risk_metrics = self.backtest_strategy(df, signals_df, 
                                                                 stop_loss_percent=self.loss_percent, 
                                                                 stop_profit_percent=self.profit_percent)
-                return strategy_func, performance, risk_metrics, df, signals_df
+                return strategy_func, performance, risk_metrics, signals_df
             except Exception as e:
                 print(f"Error in strategy {strategy_func}: {e}")
                 return None
@@ -175,13 +175,19 @@ class Strategy:
         backtest_res = []
         
         # Fetch stock data for backtesting
+        # try:
+        #     df = scraping.get_stock_data(self.symbol, interval=timeframe, DAYS=DAYS)
+        #     df = df['DF']
+
+        # except Exception as e:
+        #     print(f"Error fetching data for in bt {self.symbol}: {e}")
+        #     return None, None
+
         try:
-            df = scraping.get_stock_data(self.symbol, interval=timeframe, DAYS=DAYS)
-            df = df['DF']
             res = self.detect_signals_multithread(df)
+
         except Exception as e:
-            print(f"Error fetching data for {self.symbol}: {e}")
-            return None, None
+            print(f'Error {e}')
 
 # Run the strategy backtests concurrently using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
@@ -191,13 +197,13 @@ class Strategy:
             for future in as_completed(futures):
                 result = future.result()
                 if result:
-                    strategy_func, performance, risk_metrics, df, signals = result
+                    strategy_func, performance, risk_metrics, signals = result
 
                     if performance is None:
                         continue
                     
-                    fig = plots.plot_stock(df, self.symbol, df.columns, signals=signals, show='no', interval=timeframe)
-                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics, 'df': df, 'signals': signals, 'fig': fig})
+                    # fig = plots.plot_stock(df, self.symbol, df.columns, signals=signals, show='no', interval=timeframe)
+                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics, 'signals': signals})
 
                     # Check if this strategy has the best performance
                     if performance > best_performance:
@@ -417,7 +423,42 @@ class Strategy:
             
         Returns:
             pd.DataFrame: A DataFrame containing the combined buy and sell signals.
+
         """
+
+        def combaine(results):
+            # Combine signals from all strategies
+            # Initialize buy and sell signal counters
+            buy_signals = pd.Series(0, index=df.index)
+            sell_signals = pd.Series(0, index=df.index)
+            for strategy_name, result_df in results.items():
+
+                if result_df is not None:
+                    # if result_df.index.min() < max_index or result_df.index.max() > max_index:
+                    #     result_df = result_df[min_index:max_index]
+
+                    # else:
+                    #     result_df = result_df.reindex(df.index, fill_value=False)  # Ensure alignment
+
+                    result_df.sort_index(inplace=True)
+                    # Aggregate signals
+                    buy_signals += result_df['Buy_Signal'].astype(int)
+                    sell_signals += result_df['Sell_Signal'].astype(int)
+                
+
+            # Create final signals based on threshold
+            final_buy_signal = buy_signals >= threshold
+            final_sell_signal = sell_signals >= threshold
+
+            # Create a DataFrame for combined signals
+            combined_signals_df = pd.DataFrame({
+                'Buy_Signal': final_buy_signal,
+                'Sell_Signal': final_sell_signal
+            }, index=df.index)
+
+            return combined_signals_df
+
+  
         if df is None or df.empty:
             print(f"No data available.")
             return None
@@ -450,51 +491,23 @@ class Strategy:
                 except Exception as e:
                     print(f"Error in strategy {task_name}: {e}")
 
-        # Initialize buy and sell signal counters
-        buy_signals = pd.Series(0, index=df.index)
-        sell_signals = pd.Series(0, index=df.index)
+        
         # print(df.index.min())
         # drop nan value in df
+        df.sort_index(inplace=True)
         df.dropna(inplace=True)
         min_index = df.index.min()
         max_index = df.index.max() 
 
-        # Combine signals from all strategies
+        # try:
+        #     results['combained'] =  combaine(results)
+
+        # except Exception as e:
+        #     print(f'combained {e}')
+     
         for strategy_name, result_df in results.items():
-
-            if result_df is not None:
-                # if result_df.index.min() < max_index or result_df.index.max() > max_index:
-                #     result_df = result_df[min_index:max_index]
-
-                # else:
-                #     result_df = result_df.reindex(df.index, fill_value=False)  # Ensure alignment
-
-                result_df.sort_index(inplace=True)
-                # Aggregate signals
-                buy_signals += result_df['Buy_Signal'].astype(int)
-                sell_signals += result_df['Sell_Signal'].astype(int)
             
-
-        # Create final signals based on threshold
-        final_buy_signal = buy_signals >= threshold
-        final_sell_signal = sell_signals >= threshold
-
-        # Create a DataFrame for combined signals
-        combined_signals_df = pd.DataFrame({
-            'Buy_Signal': final_buy_signal,
-            'Sell_Signal': final_sell_signal
-        }, index=df.index)
-
-        # if combined_signals_df.index.min() < max_index or combined_signals_df.index.max() > max_index:
-        #     combined_signals_df = combined_signals_df[min_index:max_index]
-
-        # else:
-        # combined_signals_df = combined_signals_df.reindex(df.index, fill_value=False)  # Ensure alignment
-
-
-        results['combined'] = combined_signals_df
-
-        for strategy_name, result_df in results.items():
+            result_df.sort_index(inplace=True)
 
             if result_df is not None:
                 if result_df.index.min() < max_index or result_df.index.max() > max_index:

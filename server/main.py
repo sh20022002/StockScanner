@@ -1,7 +1,7 @@
 import scraping, database
 import time
 from datetime import datetime
-import strategy
+import strategy, plots
 
 
 def chack_data():
@@ -38,7 +38,7 @@ def run_trading_while_market_is_open(fivem=300):
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             try:
-                data = scraping.get_stock_data('AAPL' , interval=timeframe[2], period='max', return_flags={
+                data = scraping.get_stock_data(symbol , interval=timeframe[2], period='max', return_flags={
                                                                     'DF': True,
                                                                     'MAX_KEY': False,
                                                                     'SUMMERY': False,
@@ -49,64 +49,23 @@ def run_trading_while_market_is_open(fivem=300):
                 print(f"Error: {e}")
                 continue
 
-            stock = strategy.Strategy( **data['INFO'])
-            df = data['DF']
-            res = stock.detect_signals_multithread(df)
-            print(df.index.min(), 'df')
-            # print(res.index.tz)
-            for n, d in res.items():
-                print(d.index.min(), n)
-
-
-
-            # print(stock.detect_signals_multithread(data['DF']))
-
-            # # Assuming 'df' is your DataFrame and 'strategy_func' is the strategy function
-            # for st in ['rsi', 'bollinger_bands', 'vwap', 'ichimoku_cloud',
-            #                 'donchian_channel', 'stochastic_oscillator', 'ema_crossover', 'parabolic_sar', 'ma', 'macd', 'atr_breakout']:
-
-                            # , 'parabolic_sar', 'ma', 'macd', 'atr_breakout',
-            # print(timeframe[0])
-            # best_strategy, backtest_res = stock.get_strategy_func(timeframe=timeframe[2], )
-
+            df = strategy.Strategy( **data['INFO'])['DF']
+            print(df.head())
+            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
+            # for d in backtest_res:
+                # print(d['roi'])
+            # print(best)
             # for res in backtest_res:
-                # if res['strategy_func'] == best_strategy:
-                    # print('best')
-                # print(f"Strategy: {res['strategy_func']}, 'performance': {res['performance']}, risk_metrics: {res['risk_metrics']}")
-                # res['strategy_func']['fig'].show()
-
+            #     if res['strategy_func'] == best:
+            #         plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
+            #     print(res['performance'], res['risk_metrics'])
+                
+            
             
             break
-            # print(df)
-            # for date, (buy_signal, sell_signal) in zip(data['DF'].index, zip(buy_signals, sell_signals)):
-            #     if buy_signal or sell_signal:
-            #         print(f"Date: {date}, Buy Signal: {buy_signal}, Sell Signal: {sell_signal}")
-            # best_strategy, best_performance, best_risk_metrics = stock.get_strategy_func()
-            # print(f"Best Strategy: {best_strategy}, Best Performance: {best_performance}, Best Risk Metrics: {best_risk_metrics}")
-            
+     
         break
                 
-        #     best_strategy_name = strategy.simulate_multiple_strategies(df, company["symbol"], cash=1000, commission=0.1)
-
-        #     buy_signal, sell_signal = get_current_signals(symbol=company["symbol"], strategy_name=best_strategy_name, signal_stack=signal_stack, **best_strategy_params)
-
-        # print(f"Buy Signal: {buy_signal}, Sell Signal: {sell_signal}")
-        # print("Current Signal Stack:")
-        # print(signal_stack)
-
-        # signal_stack.remove_irrelevant_signals()
-
-        # # Check open positions or perform other account maintenance
-        # # check_open_positions()  # Implement this function as needed
-
-        # # Analyze and find the best strategy for each company
-        #   # Assuming this fetches a list of company symbols
-
-        # # Wait before checking again
-        # time.sleep(fivem)
-
-
-
 
     
 if __name__ == "__main__":
