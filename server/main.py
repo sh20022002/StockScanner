@@ -56,8 +56,8 @@ def run_trading_while_market_is_open(fivem=300):
             best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
             
             for res in backtest_res:
-            #     if res['strategy_func'] == best:
-            #         plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
+                if res['strategy_func'] == best:
+                    plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
                 print(res['performance'], res['risk_metrics'])
                 
             

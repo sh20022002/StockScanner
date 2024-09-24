@@ -2,6 +2,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pandas as pd
+import polars as pl
 
 def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     """
@@ -83,3 +84,29 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     )
 
     return fig
+
+def plot_signals(self, df: pl.DataFrame, signals_df: pl.DataFrame, symbol: str):
+        """
+        Plots the closing price along with buy and sell signals.
+
+        Args:
+            df (pl.DataFrame): The stock data.
+            signals_df (pl.DataFrame): The buy and sell signals.
+            symbol (str): Stock symbol.
+        """
+        plt.figure(figsize=(14, 7))
+        plt.plot(df['DateTime'], df['Close'], label='Close Price', alpha=0.5)
+
+        # Buy signals
+        buy_signals = signals_df.filter(pl.col('Buy_Signal') == True)
+        plt.scatter(buy_signals['DateTime'].to_list(), buy_signals['Close'].to_list(), marker='^', color='green', label='Buy Signal', alpha=1)
+
+        # Sell signals
+        sell_signals = signals_df.filter(pl.col('Sell_Signal') == True)
+        plt.scatter(sell_signals['DateTime'].to_list(), sell_signals['Close'].to_list(), marker='v', color='red', label='Sell Signal', alpha=1)
+
+        plt.title(f'{symbol} Buy/Sell Signals')
+        plt.xlabel('DateTime')
+        plt.ylabel('Price')
+        plt.legend()
+        plt.show()

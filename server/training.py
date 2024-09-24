@@ -117,3 +117,4 @@ def train_p(X_train, X_test, y_train, y_test, stock, interval):
     r2 = r2_score(y_test, y_pred)
     # print(f'R-squared: {r2}')
     
+    

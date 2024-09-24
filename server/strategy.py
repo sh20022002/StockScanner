@@ -5,95 +5,9 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import scraping  # Assuming this is your module for fetching stock data
 import plots
+import polars as pl
 
 
-
-class Signal:
-    """
-    Represents a trading signal.
-    
-    Attributes:
-        symbol (str): The stock symbol.
-        signal_type (str): The type of signal ('buy' or 'sell').
-        signal_time (datetime): The time the signal was generated.
-    """
-    def __init__(self, symbol, signal_type):
-        self.symbol = symbol
-        self.signal_type = signal_type  # 'buy' or 'sell'
-        self.signal_time = scraping.get_exchange_time()
-
-    def __str__(self):
-        return f"Signal({self.symbol}, {self.signal_type}, {self.signal_time})"
-
-class SignalStack:
-    """
-    Represents a stack of trading signals.
-    
-    Attributes:
-        signals (list): A list of Signal objects.
-    """
-    def __init__(self):
-        self.signals = []
-
-    def push(self, signal):
-        """
-        Pushes a new signal onto the stack and removes irrelevant signals.
-        
-        Args:
-            signal (Signal): The signal to be added.
-        """
-        self.signals.append(signal)
-        self.remove_irrelevant_signals()
-
-    def pop(self):
-        """
-        Pops the most recent signal from the stack.
-        
-        Returns:
-            Signal: The most recent signal, or None if the stack is empty.
-        """
-        if not self.is_empty():
-            return self.signals.pop()
-        return None
-
-    def peek(self):
-        """
-        Peeks at the most recent signal without removing it.
-        
-        Returns:
-            Signal: The most recent signal, or None if the stack is empty.
-        """
-        if not self.is_empty():
-            return self.signals[-1]
-        return None
-
-    def is_empty(self):
-        """
-        Checks if the stack is empty.
-        
-        Returns:
-            bool: True if the stack is empty, False otherwise.
-        """
-        return len(self.signals) == 0
-
-    def remove_irrelevant_signals(self):
-        """
-        Removes signals that are not relevant anymore.
-        For example, you could define irrelevance by a time threshold or
-        when a new signal of the opposite type is issued for the same symbol.
-        """
-        # Remove signals older than a certain threshold (e.g., 1 hour)
-        current_time = scraping.get_exchange_time()
-        self.signals = [signal for signal in self.signals if current_time - signal.signal_time <= timedelta(hours=1)]
-
-        # Alternatively, remove all but the latest signal for each symbol
-        latest_signals = {}
-        for signal in self.signals:
-            latest_signals[signal.symbol] = signal
-        self.signals = list(latest_signals.values())
-
-    def __str__(self):
-        return "\n".join(str(signal) for signal in self.signals)
 
 
 class Strategy:
@@ -146,7 +60,7 @@ class Strategy:
     
 
 
-    def get_strategy_func(self, df, timeframe, num_threads=5):
+    def get_strategy_func(self, df: pl.DataFrame, timeframe, num_threads=5):
         """
         Evaluates multiple strategies concurrently using backtest_strategy and returns the one with the best performance.
         
@@ -158,7 +72,7 @@ class Strategy:
             tuple: The best strategy function, along with its performance and risk metrics.
         """
 
-        def backtest_strategy_task(df, signals_df, strategy_func):
+        def backtest_strategy_task(df: pl.DataFrame, signals_df: pl.DataFrame, strategy_func: str):
             try:
                 # Call the existing backtest_strategy method for the current strategy
                 performance, risk_metrics = self.backtest_strategy(df, signals_df, 
@@ -173,15 +87,7 @@ class Strategy:
         best_performance = float('-inf')  # Initialize with very low performance
         best_risk_metrics = None
         backtest_res = []
-        
-        # Fetch stock data for backtesting
-        # try:
-        #     df = scraping.get_stock_data(self.symbol, interval=timeframe, DAYS=DAYS)
-        #     df = df['DF']
-
-        # except Exception as e:
-        #     print(f"Error fetching data for in bt {self.symbol}: {e}")
-        #     return None, None
+      
 
         try:
             res = self.detect_signals_multithread(df)
@@ -217,49 +123,49 @@ class Strategy:
         
 
 
-    def backtest_strategy(self,df , signals_df, transaction_cost=0, tax_on_profit=0.25, stop_loss_percent=None, stop_profit_percent=None):
+    def backtest_strategy(self, df: pl.DataFrame, signals_df: pl.DataFrame, transaction_cost: float = 0, tax_on_profit: float = 0.25, stop_loss_percent=None, stop_profit_percent=None) -> tuple:
         """
         Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
-        
+
         Args:
-            df (pd.DataFrame): The historical price data.
-            strategy_func (function): The trading strategy function that returns buy/sell signals.
-            my_sector (str): The sector to allocate trades.
+            df (pl.DataFrame): The historical price data.
+            signals_df (pl.DataFrame): The buy and sell signals DataFrame.
             transaction_cost (float): The transaction cost per trade.
             tax_on_profit (float): The tax on profit.
             stop_loss_percent (float, optional): The percentage for a moving stop-loss trigger. If None, no stop-loss is applied.
             stop_profit_percent (float, optional): The percentage for stop-profit trigger. If None, no stop-profit is applied.
-            
+
         Returns:
             tuple: The performance and risk metrics of the strategy.
         """
-        # Initial settings
-        cash = 100000  # Initial capital
+        # Initialize variables
+        cash = 100000.0  # Initial capital
         starting_cash = cash
-        position = 0  # Number of shares held
-        entry_price = 0  # Price at which we entered the position
-        max_drawdown = 0
+        position = 0.0  # Number of shares held
+        entry_price = 0.0  # Price at which we entered the position
+        max_drawdown = 0.0
         peak_value = cash
-        win_rate = 0
         total_trades = 0
         winning_trades = 0
-        highest_price = 0  # Track the highest price since buying for trailing stop-loss
-        
-        # Get the buy and sell signals from the strategy function
-        # Iterate over each row in the DataFrame
-        for index, row in signals_df.iterrows():
-            try:
-                current_price = df.loc[index]['Close']
-            except Exception as e:
-                continue
+        highest_price = 0.0  # Track the highest price since buying for trailing stop-loss
+
+        # Convert Polars DataFrame to list of dictionaries for efficient iteration
+        df_records = df.select(['Close', 'DateTime']).to_dict(as_series=False)
+        signals_records = signals_df.select(['Buy_Signal', 'Sell_Signal', 'DateTime']).to_dict(as_series=False)
+
+        # Iterate over each row
+        for i in range(len(df_records)):
+            current_price = df_records['Close'][i]
+            buy_signal = signals_records['Buy_Signal'][i]
+            sell_signal = signals_records['Sell_Signal'][i]
+
             # Buy logic
-            if row['Buy_Signal'] and cash > 0:
+            if buy_signal and cash > 0:
                 position = cash / current_price  # Buy as many shares as possible
                 entry_price = current_price  # Set entry price
-                cash = 0  # All cash used
+                cash = 0.0  # All cash used
                 total_trades += 1
                 highest_price = current_price  # Start tracking the highest price for trailing stop-loss
-                
 
                 # Set stop-loss and stop-profit prices only if the values are provided
                 if stop_loss_percent is not None:
@@ -286,27 +192,30 @@ class Strategy:
                 if stop_loss_price is not None and current_price <= stop_loss_price:
                     sell_value = position * current_price
                     cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
-                    position = 0  # Exit position
-                    
-                
+                    position = 0.0  # Exit position
+                    total_trades += 1
+                    # Determine if the trade was profitable
+                    if current_price > entry_price:
+                        winning_trades += 1
+
                 # Check stop-profit logic (if provided)
                 elif stop_profit_price is not None and current_price >= stop_profit_price:
                     sell_value = position * current_price
                     cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
-                    position = 0  # Exit position
-                    
-                
+                    position = 0.0  # Exit position
+                    total_trades += 1
+                    # Determine if the trade was profitable
+                    if current_price > entry_price:
+                        winning_trades += 1
+
                 # Regular sell logic based on sell signal
-                elif row['Sell_Signal']:
+                elif sell_signal:
                     sell_value = position * current_price
-                    # print(type(sell_value), type(current_price), type(position))
-                    cash = sell_value * (1 - float(transaction_cost))  # Deduct transaction cost
-                    profit = cash - starting_cash
-                    cash -= profit * tax_on_profit  # Apply tax on profit
-                    position = 0  # Exit position
-                    
-                    # Count winning trades
-                    if cash >= entry_price * position:  # If we made a profit
+                    cash = sell_value * (1 - transaction_cost)  # Deduct transaction cost
+                    position = 0.0  # Exit position
+                    total_trades += 1
+                    # Determine if the trade was profitable
+                    if current_price > entry_price:
                         winning_trades += 1
 
                 # Update drawdown and peak value
@@ -317,43 +226,30 @@ class Strategy:
                     max_drawdown = drawdown
 
         # Final calculations
-        final_cash = cash + (position * df.iloc[-1]['Close'] if position > 0 else 0)  # Cash value at end
-        win_rate = 0 if (winning_trades <= 0) or (total_trades <= 0) else winning_trades / total_trades  # Calculate win rate
-        win_rate = round(win_rate * 100, 2)  # Convert to percentage
-        performance = final_cash - starting_cash  # Total performance (profit/loss)
-        timeframe = (df.index[-1] - df.index[0]).days
+        final_cash = cash + (position * df_records['Close'][-1] if position > 0 else 0.0)  # Cash value at end
+        win_rate = 0.0 if (winning_trades == 0 or total_trades == 0) else (winning_trades / total_trades) * 100  # Percentage
+        performance = final_cash - starting_cash  # Total profit/loss
+        timeframe_days = (df_records['DateTime'][-1] - df_records['DateTime'][0]).days
         roi = ((final_cash - starting_cash) / starting_cash) * 100  # Return on investment
 
         # Risk metrics to return
         risk_metrics = {
-            'max_drawdown': max_drawdown,
-            'win_rate': win_rate,
-            'time_frame': timeframe,
-            'roi': roi
+            'max_drawdown': round(max_drawdown * 100, 2),  # Percentage
+            'win_rate': round(win_rate, 2),                # Percentage
+            'time_frame_days': timeframe_days,
+            'roi': round(roi, 2)                           # Percentage
         }
 
-        # print(f"Performance: {performance}, Risk Metrics: {risk_metrics}")
         return performance, risk_metrics
 
 
 
     def calculate_risk_score(self):
         """
+        Calculates a composite risk score based on various financial metrics.
+
         Returns:
-            dict: A dictionary containing the individual risk scores and the overall risk score.
-                The keys in the dictionary represent the type of risk, and the values represent the calculated risk score.
-                The overall risk score is the sum of all individual risk scores.
-        Example:
-            
-                'debt_to_equity_risk': 0.05,
-                'beta_risk': 0.1,
-                'profit_margin_risk': 0.02,
-                'revenue_growth_risk': 0.03,
-                'free_cashflow_risk': 0.04,
-                'overall_risk_score': 0.14
-        
-        Calculate a composite risk score for the company based on financial and operational metrics.
-        Example risk score calculation based on selected financial metrics.
+            float: The overall risk score scaled to 0-100.
         """
         weights = {
             'debt_to_equity': 0.25,
@@ -362,107 +258,109 @@ class Strategy:
             'revenue_growth': 0.15,
             'free_cashflow': 0.25
         }
-        
-        # Calculate individual risks based on weighted metrics
-                # Calculate individual risks based on weighted metrics
+
         risk_score = {}
 
-        '''
-        not always has all the data
-        '''
         # Debt-to-equity risk (normalized to 0-1 range)
-        if self.debtToEquity > 100:
-            risk_score['debt_to_equity_risk'] = min(self.debtToEquity / 1000, 1) * weights['debt_to_equity']
+        if hasattr(self, 'debtToEquity'):
+            if self.debtToEquity > 100:
+                risk_score['debt_to_equity_risk'] = min(self.debtToEquity / 1000, 1) * weights['debt_to_equity']
+            else:
+                risk_score['debt_to_equity_risk'] = 0
         else:
-            risk_score['debt_to_equity_risk'] = 0
-        
+            risk_score['debt_to_equity_risk'] = weights['debt_to_equity']  # Default high risk if data missing
+
         # Beta risk (normalized to 0-1 range)
-        risk_score['beta_risk'] = min(self.beta / 2, 1) * weights['beta']
-        
-        # Profit margin risk (lower profit margins = more risk)
-        if self.profitMargins < 0:
-            risk_score['profit_margin_risk'] = abs(self.profitMargins) * weights['profit_margins']  # Negative margins = high risk
+        if hasattr(self, 'beta'):
+            risk_score['beta_risk'] = min(self.beta / 2, 1) * weights['beta']
         else:
-            risk_score['profit_margin_risk'] = max(0.1 - self.profitMargins, 0) * weights['profit_margins']  # Margins below 10% add risk
+            risk_score['beta_risk'] = weights['beta']  # Default high risk if data missing
+
+        # Profit margin risk (lower profit margins = more risk)
+        if hasattr(self, 'profitMargins'):
+            if self.profitMargins < 0:
+                risk_score['profit_margin_risk'] = abs(self.profitMargins) * weights['profit_margins']  # Negative margins = high risk
+            else:
+                risk_score['profit_margin_risk'] = max(0.1 - self.profitMargins, 0) * weights['profit_margins']  # Margins below 10% add risk
+        else:
+            risk_score['profit_margin_risk'] = weights['profit_margins']  # Default high risk if data missing
 
         # Revenue growth risk (negative or low growth = higher risk)
-        if self.revenueGrowth < 0:
-            risk_score['revenue_growth_risk'] = abs(self.revenueGrowth) * weights['revenue_growth']
+        if hasattr(self, 'revenueGrowth'):
+            if self.revenueGrowth < 0:
+                risk_score['revenue_growth_risk'] = abs(self.revenueGrowth) * weights['revenue_growth']
+            else:
+                risk_score['revenue_growth_risk'] = max(0.05 - self.revenueGrowth, 0) * weights['revenue_growth']
         else:
-            risk_score['revenue_growth_risk'] = max(0.05 - self.revenueGrowth, 0) * weights['revenue_growth']
+            risk_score['revenue_growth_risk'] = weights['revenue_growth']  # Default high risk if data missing
 
         # Free cash flow risk (low cash flow adds risk)
-        if self.ebitda != 0:
-            free_cashflow_to_ebitda_ratio = self.freeCashflow / self.ebitda
+        if hasattr(self, 'ebitda') and hasattr(self, 'freeCashflow'):
+            if self.ebitda != 0:
+                free_cashflow_to_ebitda_ratio = self.freeCashflow / self.ebitda
+            else:
+                free_cashflow_to_ebitda_ratio = 0
+            if free_cashflow_to_ebitda_ratio < 0.1:
+                risk_score['free_cashflow_risk'] = (0.1 - free_cashflow_to_ebitda_ratio) * weights['free_cashflow']
+            else:
+                risk_score['free_cashflow_risk'] = 0
         else:
-            free_cashflow_to_ebitda_ratio = 0
-        if free_cashflow_to_ebitda_ratio < 0.1:
-            risk_score['free_cashflow_risk'] = (0.1 - free_cashflow_to_ebitda_ratio) * weights['free_cashflow']
-        else:
-            risk_score['free_cashflow_risk'] = 0
+            risk_score['free_cashflow_risk'] = weights['free_cashflow']  # Default high risk if data missing
 
         # Calculate overall risk score and scale to 0-100
         overall_risk_score = sum(risk_score.values()) * 100  # Scale to 0-100
 
         risk_score['overall_risk_score'] = overall_risk_score
 
-        
         return risk_score['overall_risk_score']
 
    
 
 
-    def detect_signals_multithread(self, df, threshold=2):
+    def detect_signals_multithread(self, df: pl.DataFrame, threshold=2) -> dict:
         """
         Detects buy and sell signals using multiple trading strategies with multithreading.
         Works with both live stock data and historical stock data.
-        
-        Args:
-            df (pd.DataFrame): The stock data for which signals should be detected.
-            threshold (int): Minimum number of strategies that must agree to generate a final buy/sell signal.
-            
-        Returns:
-            pd.DataFrame: A DataFrame containing the combined buy and sell signals.
 
+        Args:
+            df (pl.DataFrame): The stock data for which signals should be detected.
+            threshold (int): Minimum number of strategies that must agree to generate a final buy/sell signal.
+
+        Returns:
+            dict: A dictionary of strategy names and their respective signal DataFrames.
         """
 
-        def combaine(results):
+        def combine(results):
             # Combine signals from all strategies
             # Initialize buy and sell signal counters
-            buy_signals = pd.Series(0, index=df.index)
-            sell_signals = pd.Series(0, index=df.index)
+            buy_signals = pl.Series("Buy_Signal", [False] * len(df))
+            sell_signals = pl.Series("Sell_Signal", [False] * len(df))
+
             for strategy_name, result_df in results.items():
-
                 if result_df is not None:
-                    # if result_df.index.min() < max_index or result_df.index.max() > max_index:
-                    #     result_df = result_df[min_index:max_index]
-
-                    # else:
-                    #     result_df = result_df.reindex(df.index, fill_value=False)  # Ensure alignment
-
-                    result_df.sort_index(inplace=True)
+                    # Align signals with the main DataFrame
+                    result_df = result_df.join(df.select(['DateTime']), on='DateTime', how='left').fill_null(False)
+                    
                     # Aggregate signals
-                    buy_signals += result_df['Buy_Signal'].astype(int)
-                    sell_signals += result_df['Sell_Signal'].astype(int)
-                
+                    buy_signals = buy_signals + result_df['Buy_Signal'].cast(pl.Int32)
+                    sell_signals = sell_signals + result_df['Sell_Signal'].cast(pl.Int32)
 
             # Create final signals based on threshold
             final_buy_signal = buy_signals >= threshold
             final_sell_signal = sell_signals >= threshold
 
             # Create a DataFrame for combined signals
-            combined_signals_df = pd.DataFrame({
+            combined_signals_df = pl.DataFrame({
                 'Buy_Signal': final_buy_signal,
-                'Sell_Signal': final_sell_signal
-            }, index=df.index)
+                'Sell_Signal': final_sell_signal,
+                'DateTime': df['DateTime']
+            })
 
             return combined_signals_df
 
-  
-        if df is None or df.empty:
-            print(f"No data available.")
+        if df is None or df.is_empty():
+            print("No data available.")
             return None
-        df = df.copy()
 
         # Define tasks for multithreading (pass the functions, not the result of calling them)
         tasks = [
@@ -479,8 +377,8 @@ class Strategy:
             ('ema_crossover', self.ema_crossover)
         ]
 
-        # Run all tasks concurrently using multithreading
-        with ThreadPoolExecutor() as executor:
+        # Run all tasks concurrently using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(task[1], df): task[0] for task in tasks}
             results = {}
 
@@ -491,37 +389,11 @@ class Strategy:
                 except Exception as e:
                     print(f"Error in strategy {task_name}: {e}")
 
-        
-        # print(df.index.min())
-        # drop nan value in df
-        df.sort_index(inplace=True)
-        df.dropna(inplace=True)
-        min_index = df.index.min()
-        max_index = df.index.max() 
-
-        # try:
-        #     results['combained'] =  combaine(results)
-
-        # except Exception as e:
-        #     print(f'combained {e}')
-     
-        for strategy_name, result_df in results.items():
-            
-            result_df.sort_index(inplace=True)
-
-            if result_df is not None:
-                if result_df.index.min() < max_index or result_df.index.max() > max_index:
-                    result_df = result_df[min_index:max_index]
-
-                else:
-                    result_df = result_df.reindex(df.index, fill_value=False)  # Ensure alignment
-
-
-
         return results
 
 
-    def macd(self, df):
+
+    def macd(self, df: pl.DataFrame) -> pl.DataFrame:
 
         required_columns = ['MACD', 'MACD_Signal']
         if not all(col in df.columns for col in required_columns):
@@ -537,10 +409,10 @@ class Strategy:
             return None
     
         
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
         
-    def rsi(self, df, Upper_Band=60, Lower_Band=30):
+    def rsi(self, df: pl.DataFrame, Upper_Band=60, Lower_Band=30) -> pl.DataFrame:
         """
         Calculates the Relative Strength Index (RSI) signals.
         
@@ -554,9 +426,9 @@ class Strategy:
         buy_signals = (df['RSI'] < Lower_Band) & (df['RSI'].shift(1) >= Lower_Band)
         sell_signals = (df['RSI'] > Upper_Band) & (df['RSI'].shift(1) <= Upper_Band)
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
         
-    def ma(self, df):
+    def ma(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates the Moving Average (MA) signals.
         
@@ -569,9 +441,9 @@ class Strategy:
         buy_signals = (df['SMA20'] > df['SMA150']) & (df['SMA20'].shift(1) <= df['SMA150'].shift(1))
         sell_signals = (df['SMA20'] < df['SMA150']) & (df['SMA20'].shift(1) >= df['SMA150'].shift(1))
        
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
-    def bollinger_bands(self, df, window=20, num_std_dev=2):
+    def bollinger_bands(self, df: pl.DataFrame, window=20, num_std_dev=2) -> pl.DataFrame:
         """
         Calculates the Bollinger Bands signals.
         """
@@ -589,10 +461,10 @@ class Strategy:
         buy_signals = (df['Close'] < df['Lower_Band']) & (df['Close'].shift(1) >= df['Lower_Band'].shift(1))
         sell_signals = (df['Close'] > df['Upper_Band']) & (df['Close'].shift(1) <= df['Upper_Band'].shift(1))
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
 
-    def ema_crossover(self, df):
+    def ema_crossover(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates the Exponential Moving Average Crossover signals.
 
@@ -608,9 +480,9 @@ class Strategy:
         buy_signals = (df['EMA12'] > df['EMA26']) & (df['EMA12'].shift(1) <= df['EMA26'].shift(1))
         sell_signals = (df['EMA12'] < df['EMA26']) & (df['EMA12'].shift(1) >= df['EMA26'].shift(1))
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
-    def stochastic_oscillator(self, df, k_window=14, d_window=3, overbought=80, oversold=20):
+    def stochastic_oscillator(self, df: pl.DataFrame, k_window=14, d_window=3, overbought=80, oversold=20) -> pl.DataFrame:
         """
         Calculates the Stochastic Oscillator signals.
 
@@ -634,13 +506,13 @@ class Strategy:
         required_columns = ['High', 'Low', 'Close']
         if not all(col in df.columns for col in required_columns):
             print(f"DataFrame must contain {required_columns} columns.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
         # Ensure sufficient data length
         required_length = max(k_window, d_window)
         if len(df) < required_length:
             print(f"Insufficient data for Stochastic Oscillator calculation. Required: {required_length}, Available: {len(df)}")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
 
         # Sort the DataFrame by index to ensure chronological order
         df.sort_index(inplace=True)
@@ -665,210 +537,175 @@ class Strategy:
         # Clean up temporary columns
         df.drop(columns=['Lowest_Low', 'Highest_High', 'Denominator', '%K', '%D'], inplace=True)
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
 
 
+    def parabolic_sar(self, df: pl.DataFrame, step=0.02, max_step=0.2) -> pl.DataFrame:
+        """
+        Calculates the Parabolic SAR signals.
 
+        Args:
+            df (pl.DataFrame): The historical price data.
+            step (float): The acceleration factor step.
+            max_step (float): The maximum acceleration factor.
 
-    def parabolic_sar(self, df, step=0.02, max_step=0.2):
-        # Ensure DataFrame is not empty and has at least two rows
-        if df is None or df.empty or len(df) < 2:
-            print("DataFrame must contain at least two rows for Parabolic SAR calculation.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
-        
+        Returns:
+            pl.DataFrame: The buy and sell signals.
+        """
         # Ensure required columns exist
         required_columns = ['High', 'Low', 'Close']
         if not all(col in df.columns for col in required_columns):
             print(f"DataFrame must contain {required_columns} columns for Parabolic SAR calculation.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
-        
-        # Sort the DataFrame by index to ensure chronological order
-        df.sort_index(inplace=True)
-        
-        # Initialize arrays
-        psar = np.zeros(len(df))
-        trend = np.zeros(len(df))
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], schema=[('Buy_Signal', pl.Boolean), ('Sell_Signal', pl.Boolean), ('DateTime', pl.Datetime)])
+
+        # Initialize variables
+        sar = [0.0] * len(df)
+        trend = [1] * len(df)  # 1 for uptrend, -1 for downtrend
+        ep = df['High'][0]
         af = step
-        ep = df['High'].iloc[0]
-        
-        # Start with an Uptrend
-        psar[0] = df['Low'].iloc[0]
-        trend[0] = 1  # 1 for Uptrend
-        
-        buy_signals = np.zeros(len(df), dtype=bool)
-        sell_signals = np.zeros(len(df), dtype=bool)
+
+        buy_signals = [False] * len(df)
+        sell_signals = [False] * len(df)
+
+        sar[0] = df['Low'][0]
 
         for i in range(1, len(df)):
-            # Update PSAR based on current trend
-            if trend[i - 1] == 1:  # Uptrend
-                psar[i] = psar[i - 1] + af * (ep - psar[i - 1])
-                if df['Low'].iloc[i] < psar[i]:  # Reversal to downtrend
-                    trend[i] = -1  # Switch to downtrend
-                    psar[i] = ep  # Set SAR to previous extreme point
-                    ep = df['Low'].iloc[i]  # Reset extreme point
-                    af = step  # Reset acceleration factor
-                    sell_signals[i] = True  # Mark sell signal
+            if trend[i-1] == 1:
+                sar[i] = sar[i-1] + af * (ep - sar[i-1])
+                if df['Low'][i] < sar[i]:
+                    trend[i] = -1
+                    sar[i] = ep
+                    ep = df['Low'][i]
+                    af = step
+                    sell_signals[i] = True
                 else:
-                    trend[i] = 1  # Continue uptrend
-                    if df['High'].iloc[i] > ep:  # New extreme point
-                        ep = df['High'].iloc[i]
-                        af = min(af + step, max_step)  # Increase acceleration factor
-            else:  # Downtrend
-                psar[i] = psar[i - 1] + af * (ep - psar[i - 1])
-                if df['High'].iloc[i] > psar[i]:  # Reversal to uptrend
-                    trend[i] = 1  # Switch to uptrend
-                    psar[i] = ep  # Set SAR to previous extreme point
-                    ep = df['High'].iloc[i]  # Reset extreme point
-                    af = step  # Reset acceleration factor
-                    buy_signals[i] = True  # Mark buy signal
+                    trend[i] = 1
+                    if df['High'][i] > ep:
+                        ep = df['High'][i]
+                        af = min(af + step, max_step)
+            else:
+                sar[i] = sar[i-1] + af * (ep - sar[i-1])
+                if df['High'][i] > sar[i]:
+                    trend[i] = 1
+                    sar[i] = ep
+                    ep = df['High'][i]
+                    af = step
+                    buy_signals[i] = True
                 else:
-                    trend[i] = -1  # Continue downtrend
-                    if df['Low'].iloc[i] < ep:  # New extreme point
-                        ep = df['Low'].iloc[i]
-                        af = min(af + step, max_step)  # Increase acceleration factor
+                    trend[i] = -1
+                    if df['Low'][i] < ep:
+                        ep = df['Low'][i]
+                        af = min(af + step, max_step)
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        # Assign SAR values to DataFrame
+        df = df.with_columns([
+            pl.Series('SAR', sar).cast(pl.Float32),
+            pl.Series('Trend', trend).cast(pl.Int32)
+        ])
 
-    def atr_breakout(self, df, window=14, multiplier=1.2):
+        # Generate buy and sell signals
+        
+
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+
+    def atr_breakout(self, df: pl.DataFrame, window=14, multiplier=1.2) -> pl.DataFrame:
         """
         Calculates the ATR breakout signals.
 
-        multiplier is set in range of 0.5 - 1.5 for lower timeframes
-        multiplier is set in range of 1.5 - 2 for daily timeframes
-        multiplier is set in range of 2 - 3 for larger timeframes
         Args:
-            df (pd.DataFrame): The historical price data.
+            df (pl.DataFrame): The historical price data.
             window (int): The window period for ATR calculation.
             multiplier (float): The multiplier for breakout range.
-            
+
         Returns:
-            pd.DataFrame: The buy and sell signals.
+            pl.DataFrame: The buy and sell signals.
         """
-        if df['ATR'].isnull().any():
-            df['ATR'].fillna(method='bfill', inplace=True)
+        required_columns = ['Close', 'High', 'Low', 'ATR']
+        if not all(col in df.columns for col in required_columns):
+            print(f"DataFrame must contain {required_columns} columns for ATR Breakout calculation.")
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], schema=[('Buy_Signal', pl.Boolean), ('Sell_Signal', pl.Boolean), ('DateTime', pl.Datetime)])
 
         # Calculate breakout levels
-        df['Upper_Breakout'] = df['Close'] + (df['ATR'] * multiplier)
-        df['Lower_Breakout'] = df['Close'] - (df['ATR'] * multiplier)
+        df = df.with_columns([
+            (df['Close'] + (df['ATR'] * multiplier)).alias('Upper_Breakout'),
+            (df['Close'] - (df['ATR'] * multiplier)).alias('Lower_Breakout')
+        ])
 
         # Generate buy and sell signals
         buy_signals = (df['Close'] > df['Upper_Breakout'].shift(1))
         sell_signals = (df['Close'] < df['Lower_Breakout'].shift(1))
-        return generate_signal(sell_signals, buy_signals, df.index)
 
-    def donchian_channel(self, df, window=20):
+
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+
+    def donchian_channel(self, df: pl.DataFrame, window=20) -> pl.DataFrame:
         """
         Calculates the Donchian Channel breakout signals.
 
         Args:
-            df (pd.DataFrame): The historical price data.
+            df (pl.DataFrame): The historical price data.
             window (int): The window period for Donchian Channel calculation.
 
         Returns:
-            pd.DataFrame: The buy and sell signals.
+            pl.DataFrame: The buy and sell signals.
         """
-            # Parameter validation
-        if not isinstance(window, int) or window <= 0:
-            raise ValueError(f"window must be a positive integer. Received window={window}")
-
-        # Ensure required columns exist
         required_columns = ['High', 'Low', 'Close']
         if not all(col in df.columns for col in required_columns):
             print(f"DataFrame must contain {required_columns} columns.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
-
-        # Ensure sufficient data length
-        if len(df) < window:
-            print(f"Insufficient data for Donchian Channel calculation. Required: {window}, Available: {len(df)}")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], schema=[('Buy_Signal', pl.Boolean), ('Sell_Signal', pl.Boolean), ('DateTime', pl.Datetime)])
 
         # Calculate Donchian Channel
-        df['Donchian_High'] = df['High'].rolling(window=window).max()
-        df['Donchian_Low'] = df['Low'].rolling(window=window).min()
-
-        # Drop NaN values resulting from rolling calculations
-        df.dropna(subset=['Donchian_High', 'Donchian_Low'], inplace=True)
-
-        # Ensure DataFrame is not empty after dropna
-        if df.empty:
-            print("DataFrame is empty after dropping NaN values.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+        df = df.with_columns([
+            pl.col('High').rolling_max(window=window).alias('Donchian_High'),
+            pl.col('Low').rolling_min(window=window).alias('Donchian_Low')
+        ])
 
         # Generate buy and sell signals
         buy_signals = (df['Close'] > df['Donchian_High'].shift(1))
         sell_signals = (df['Close'] < df['Donchian_Low'].shift(1))
 
+        
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
-
-    def ichimoku_cloud(self, df, conversion_window=9, base_window=26, leading_span_window=52):
+    def ichimoku_cloud(self, df: pl.DataFrame, conversion_window=9, base_window=26, leading_span_window=52) -> pl.DataFrame:
         """
         Calculates the Ichimoku Cloud signals.
 
         Args:
-            df (pd.DataFrame): The historical price data.
+            df (pl.DataFrame): The historical price data.
             conversion_window (int): The window period for the conversion line.
             base_window (int): The window period for the base line.
             leading_span_window (int): The window period for the leading span B.
 
         Returns:
-            pd.DataFrame: The buy and sell signals.
+            pl.DataFrame: The buy and sell signals.
         """
-        if df.empty or len(df) < conversion_window:
-            raise ValueError("Insufficient data for the calculation.")
-
-        # Parameter validation
-        for param_name, param_value in [('conversion_window', conversion_window),
-                                        ('base_window', base_window),
-                                        ('leading_span_window', leading_span_window)]:
-            if not isinstance(param_value, int) or param_value <= 0:
-                raise ValueError(f"{param_name} must be a positive integer. Received {param_name}={param_value}")
-
-        # Ensure required columns exist
         required_columns = ['High', 'Low', 'Close']
         if not all(col in df.columns for col in required_columns):
             print(f"DataFrame must contain {required_columns} columns.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
-
-        # Ensure sufficient data length
-        max_window = max(conversion_window, base_window, leading_span_window)
-        required_length = max_window + base_window  # Account for shift in Leading Span A and B
-        if len(df) < required_length:
-            print(f"Insufficient data for Ichimoku Cloud calculation. Required: {required_length}, Available: {len(df)}")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], schema=[('Buy_Signal', pl.Boolean), ('Sell_Signal', pl.Boolean), ('DateTime', pl.Datetime)])
 
         # Calculate Ichimoku components
-        df['Conversion_Line'] = (df['High'].rolling(window=conversion_window).max() + df['Low'].rolling(window=conversion_window).min()) / 2
-        df['Base_Line'] = (df['High'].rolling(window=base_window).max() + df['Low'].rolling(window=base_window).min()) / 2
-        df['Leading_Span_A'] = ((df['Conversion_Line'] + df['Base_Line']) / 2).shift(base_window)
-        df['Leading_Span_B'] = ((df['High'].rolling(window=leading_span_window).max() + df['Low'].rolling(window=leading_span_window).min()) / 2).shift(base_window)
-        df['Lagging_Span'] = df['Close'].shift(-base_window)
+        df = df.with_columns([
+            ((pl.col('High').rolling_max(window=conversion_window) + pl.col('Low').rolling_min(window=conversion_window)) / 2).alias('Conversion_Line'),
+            ((pl.col('High').rolling_max(window=base_window) + pl.col('Low').rolling_min(window=base_window)) / 2).alias('Base_Line'),
+            (((pl.col('Conversion_Line') + pl.col('Base_Line')) / 2).shift(base_window)).alias('Leading_Span_A'),
+            ((pl.col('High').rolling_max(window=leading_span_window) + pl.col('Low').rolling_min(window=leading_span_window)) / 2).shift(base_window).alias('Leading_Span_B')
+        ])
 
-        # Drop rows with NaN values resulting from rolling calculations
-        df.dropna(subset=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B'], inplace=True)
-
-        # Ensure DataFrame is not empty after dropping NaN values
-        if df.empty:
-            print("DataFrame is empty after dropping NaN values.")
-            return pd.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
-
-        # Buy signals when price crosses above the cloud
+        # Generate buy and sell signals
         buy_signals = (df['Close'] > df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1)) & \
                     (df['Close'].shift(1) <= df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1).shift(1))
 
-        # Sell signals when price crosses below the cloud
         sell_signals = (df['Close'] < df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1)) & \
                     (df['Close'].shift(1) >= df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1).shift(1))
 
 
-        # Clean up temporary columns
-        df.drop(columns=['Conversion_Line', 'Base_Line', 'Leading_Span_A', 'Leading_Span_B', 'Lagging_Span'], inplace=True)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
-        return generate_signal(sell_signals, buy_signals, df.index)
-
-    def vwap(self, df):
+    def vwap(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates VWAP (Volume Weighted Average Price) buy and sell signals.
         
@@ -887,14 +724,29 @@ class Strategy:
         buy_signals = (df['Close'] > df['VWAP']) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
         sell_signals = (df['Close'] < df['VWAP']) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
 
-        return generate_signal(sell_signals, buy_signals, df.index)
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
 
-def generate_signal(sell_signals, buy_signals, indexs):
+def generate_signal(sell_signals: list, buy_signals: list, indexs: list) -> pl.DataFrame:
+    """
+    Generates a Polars DataFrame containing buy and sell signals.
 
-    signals_df = pd.DataFrame({
-            'Buy_Signal': buy_signals,
-            'Sell_Signal': sell_signals
-        }, index=indexs)
-        # signals_df = signals_df[(signals_df['Buy_Signal']) | (signals_df['Sell_Signal'])]
-        
+    Args:
+        sell_signals (list): Boolean list indicating sell signals.
+        buy_signals (list): Boolean list indicating buy signals.
+        indexs (list): The index (datetime) for the signals.
+
+    Returns:
+        pl.DataFrame: DataFrame with Buy_Signal and Sell_Signal columns.
+    """
+    # Ensure the lengths of the lists are equal
+    if not (len(sell_signals) == len(buy_signals) == len(indexs)):
+        raise ValueError("Length of sell_signals, buy_signals, and indexs must be equal.")
+
+    # Create a Polars DataFrame
+    signals_df = pl.DataFrame({
+        'Buy_Signal': buy_signals,
+        'Sell_Signal': sell_signals,
+        'DateTime': indexs
+    })
+
     return signals_df
