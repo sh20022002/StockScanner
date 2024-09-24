@@ -93,6 +93,7 @@ class Strategy:
             res = self.detect_signals_multithread(df)
 
         except Exception as e:
+            res = None
             print(f'Error {e}')
 
 # Run the strategy backtests concurrently using ThreadPoolExecutor
@@ -317,7 +318,7 @@ class Strategy:
    
 
 
-    def detect_signals_multithread(self, df: pl.DataFrame, threshold=2) -> dict:
+    def detect_signals_multithread(self, df: pd.DataFrame, threshold=2) -> dict:
         """
         Detects buy and sell signals using multiple trading strategies with multithreading.
         Works with both live stock data and historical stock data.
@@ -357,6 +358,10 @@ class Strategy:
             })
 
             return combined_signals_df
+
+        # convert df to polars
+        df = pl.from_pandas(df, include_index=True)
+       
 
         if df is None or df.is_empty():
             print("No data available.")
@@ -409,7 +414,7 @@ class Strategy:
             return None
     
         
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
         
     def rsi(self, df: pl.DataFrame, Upper_Band=60, Lower_Band=30) -> pl.DataFrame:
@@ -426,7 +431,7 @@ class Strategy:
         buy_signals = (df['RSI'] < Lower_Band) & (df['RSI'].shift(1) >= Lower_Band)
         sell_signals = (df['RSI'] > Upper_Band) & (df['RSI'].shift(1) <= Upper_Band)
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
         
     def ma(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -441,27 +446,39 @@ class Strategy:
         buy_signals = (df['SMA20'] > df['SMA150']) & (df['SMA20'].shift(1) <= df['SMA150'].shift(1))
         sell_signals = (df['SMA20'] < df['SMA150']) & (df['SMA20'].shift(1) >= df['SMA150'].shift(1))
        
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
-    def bollinger_bands(self, df: pl.DataFrame, window=20, num_std_dev=2) -> pl.DataFrame:
+    def bollinger_bands(self, df: pl.DataFrame, window: int = 20, num_std_dev=2) -> pl.DataFrame:
         """
         Calculates the Bollinger Bands signals.
         """
 
         # Calculate Bollinger Bands
-        df['STD20'] = df['Close'].rolling(window=window).std()
+        df = df.select(pl.col('Close').rolling_std(window).alias('STD20'))
 
-        df.dropna(subset=['SMA20', 'STD20'], inplace=True)
+        # Step 2: Drop rows where 'SMA20' or 'STD20' have NaN values
+        df = df.filter(
+            pl.col('SMA20').is_not_null() & pl.col('STD20').is_not_null()
+        )
 
-        df['Upper_Band'] = df['SMA20'] + (df['STD20'] * num_std_dev)
-        df['Lower_Band'] = df['SMA20'] - (df['STD20'] * num_std_dev)
+        # Step 3: Create 'Upper_Band' and 'Lower_Band'
+        df = df.select([
+            (pl.col('SMA20') + (pl.col('STD20') * num_std_dev)).alias('Upper_Band'),
+            (pl.col('SMA20') - (pl.col('STD20') * num_std_dev)).alias('Lower_Band')
+        ])
 
-        
-        # Generate signals
-        buy_signals = (df['Close'] < df['Lower_Band']) & (df['Close'].shift(1) >= df['Lower_Band'].shift(1))
-        sell_signals = (df['Close'] > df['Upper_Band']) & (df['Close'].shift(1) <= df['Upper_Band'].shift(1))
+        # Step 4: Generate buy and sell signals
+        buy_signals = (
+            (pl.col('Close') < pl.col('Lower_Band')) &
+            (pl.col('Close').shift(1) >= pl.col('Lower_Band').shift(1))
+        )
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        sell_signals = (
+            (pl.col('Close') > pl.col('Upper_Band')) &
+            (pl.col('Close').shift(1) <= pl.col('Upper_Band').shift(1))
+        )
+
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
 
     def ema_crossover(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -480,7 +497,7 @@ class Strategy:
         buy_signals = (df['EMA12'] > df['EMA26']) & (df['EMA12'].shift(1) <= df['EMA26'].shift(1))
         sell_signals = (df['EMA12'] < df['EMA26']) & (df['EMA12'].shift(1) >= df['EMA26'].shift(1))
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def stochastic_oscillator(self, df: pl.DataFrame, k_window=14, d_window=3, overbought=80, oversold=20) -> pl.DataFrame:
         """
@@ -506,13 +523,13 @@ class Strategy:
         required_columns = ['High', 'Low', 'Close']
         if not all(col in df.columns for col in required_columns):
             print(f"DataFrame must contain {required_columns} columns.")
-            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df['Datetime'])
 
         # Ensure sufficient data length
         required_length = max(k_window, d_window)
         if len(df) < required_length:
             print(f"Insufficient data for Stochastic Oscillator calculation. Required: {required_length}, Available: {len(df)}")
-            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df.index)
+            return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df['Datetime'])
 
         # Sort the DataFrame by index to ensure chronological order
         df.sort_index(inplace=True)
@@ -537,7 +554,7 @@ class Strategy:
         # Clean up temporary columns
         df.drop(columns=['Lowest_Low', 'Highest_High', 'Denominator', '%K', '%D'], inplace=True)
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
 
 
@@ -607,7 +624,7 @@ class Strategy:
         # Generate buy and sell signals
         
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def atr_breakout(self, df: pl.DataFrame, window=14, multiplier=1.2) -> pl.DataFrame:
         """
@@ -637,7 +654,7 @@ class Strategy:
         sell_signals = (df['Close'] < df['Lower_Breakout'].shift(1))
 
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def donchian_channel(self, df: pl.DataFrame, window=20) -> pl.DataFrame:
         """
@@ -667,7 +684,7 @@ class Strategy:
 
         
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def ichimoku_cloud(self, df: pl.DataFrame, conversion_window=9, base_window=26, leading_span_window=52) -> pl.DataFrame:
         """
@@ -703,7 +720,7 @@ class Strategy:
                     (df['Close'].shift(1) >= df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1).shift(1))
 
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def vwap(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -724,7 +741,7 @@ class Strategy:
         buy_signals = (df['Close'] > df['VWAP']) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
         sell_signals = (df['Close'] < df['VWAP']) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df.index.to_list())
+        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
 def generate_signal(sell_signals: list, buy_signals: list, indexs: list) -> pl.DataFrame:
     """

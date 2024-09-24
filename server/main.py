@@ -1,7 +1,7 @@
 import scraping, database
 import time
 from datetime import datetime
-import strategy, plots
+import strategy, plots, signal
 
 
 def chack_data():
@@ -27,7 +27,7 @@ def run_trading_while_market_is_open(fivem=300):
 
     """
      
-    signal_stack = strategy.SignalStack()
+    signal_stack = signal.SignalStack()
     timeframe = ['1d', '1h', '1m']
 
     while True: #scraping.is_nyse_open():  
@@ -52,13 +52,13 @@ def run_trading_while_market_is_open(fivem=300):
 
             stock = strategy.Strategy( **data['INFO'])
             df = data['DF']
-            # print(df.tail())
-            best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
+            print(stock.detect_signals_multithread(df))
+            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
             
-            for res in backtest_res:
-                if res['strategy_func'] == best:
-                    plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
-                print(res['performance'], res['risk_metrics'])
+            # for res in backtest_res:
+            #     if res['strategy_func'] == best:
+            #         plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
+            #     print(res['performance'], res['risk_metrics'])
                 
             
             
