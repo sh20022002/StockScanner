@@ -20,12 +20,12 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     # if 'MCAD' in columns:
         # pass
 
-    df['Volume'] = df['Volume'] / 1000000
+    # df['Volume'] = df['Volume'] / 1000000
    
 
     fig = go.Figure()
     
-    fig.add_trace(go.Candlestick(x=df.index,
+    fig.add_trace(go.Candlestick(x=df['Datetime'],
                 open=df['Open'],
                 high=df['High'],
                 low=df['Low'],
@@ -47,8 +47,8 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     # Ensure that 'Buy_Signal' and 'Sell_Signal' columns are in the signals DataFrame
         if 'Buy_Signal' in signals.columns and 'Sell_Signal' in signals.columns:
             # Extract indices where Buy_Signal is True
-            buy_indices = signals[signals['Buy_Signal'] == True].index
-            buy_prices = df.loc[buy_indices, 'Close']
+            buy_indices = signals.filter(signals['Buy_Signal'] == True)['Datetime'].to_list()
+            buy_prices = df.filter(df['Datetime'].is_in(buy_indices)).select('Close').to_series().to_list()
 
             # Add green markers for buy signals
             fig.add_trace(go.Scatter(
@@ -60,8 +60,8 @@ def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
             ))
 
             # Extract indices where Sell_Signal is True
-            sell_indices = signals[signals['Sell_Signal'] == True].index
-            sell_prices = df.loc[sell_indices, 'Close']
+            sell_indices = signals.filter(signals['Sell_Signal'] == True)['Datetime'].to_list()
+            sell_prices = df.filter(df['Datetime'].is_in(sell_indices)).select('Close').to_series().to_list()
 
             # Add red markers for sell signals
             fig.add_trace(go.Scatter(

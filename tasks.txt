@@ -1,0 +1,3 @@
+vwap and stochastic_oscillator are the only indicaitors that return positive roi in 1d timframe
+1. indicaitors need relaxation of the Thresholds
+2. no 1h data

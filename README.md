@@ -11,6 +11,23 @@ SmarTraid is an advanced trading system that integrates a smart bot designed to 
 - **Quantitative Trading Strategies**: Implements diverse trading strategies tailored to specific market conditions.
 - **Genetic Algorithm Optimization**: Optimizes strategies to find the most effective approach for each stock.
 - **Data Management**: Efficient scraping and storage of trading data and customer information in a secure database.
+## uses
+Summary Table:
+Indicator	- Purpose	- Key Signals
+MACD	- Momentum & trend	- Crossover of MACD and Signal line
+RSI	- Momentum (overbought/oversold)	- Above 70 (sell), Below 30 (buy)
+MA	- Trend-following	- Price above/below the moving average
+Bollinger Bands	- Volatility & reversals	- Price touching bands or contraction breakout
+VWAP	- Price relative to average	- Price above/below VWAP
+Ichimoku Cloud	- Comprehensive (trend & momentum)	- Price vs. cloud and line crossovers
+Donchian Channel	- Volatility & breakouts	- Price breaking upper/lower bounds
+ATR Breakout	- Volatility-based entries/exits	- Price moving above/below levels based on ATR
+Parabolic SAR	- Trend & reversals	- Dots switching above/below price
+Stochastic Oscillator	- Momentum (overbought/oversold)	- %K crossing %D in oversold/overbought zones
+EMA Crossover	- Trend changes	- Shorter EMA crossing longer EMA
+
+
+Each indicator has unique strengths and works best in specific market conditions. Combining multiple indicators can help create robust strategies. Let me know if you need help implementing any of these!
 
 ## Technologies Used
 - **Programming Languages**: Python

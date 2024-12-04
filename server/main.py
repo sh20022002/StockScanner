@@ -1,7 +1,9 @@
 import scraping, database
 import time
 from datetime import datetime
-import strategy, plots, signal
+import strategy #, plots, signal
+import polars as pl
+import polars.selectors as cs
 
 
 def chack_data():
@@ -27,8 +29,8 @@ def run_trading_while_market_is_open(fivem=300):
 
     """
      
-    signal_stack = signal.SignalStack()
-    timeframe = ['1d', '1h', '1m']
+    # signal_stack = signal.SignalStack()
+    timeframe = '1d' # '1d', '1h', '1m'
 
     while True: #scraping.is_nyse_open():  
 
@@ -38,7 +40,7 @@ def run_trading_while_market_is_open(fivem=300):
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             try:
-                data = scraping.get_stock_data(symbol , interval=timeframe[2], period='max', return_flags={
+                data = scraping.get_stock_data(symbol , interval=timeframe, period='max', return_flags={
                                                                     'DF': True,
                                                                     'INDICATORS': True,
                                                                     'MAX_KEY': False,
@@ -46,25 +48,34 @@ def run_trading_while_market_is_open(fivem=300):
                                                                     'DIVD': False,
                                                                     'INFO': True
                                                                     } )
+                stock = strategy.Strategy( **data['INFO'])
+                df = data['DF']
             except Exception as e:
                 print(f"Error: {e}")
                 continue
 
-            stock = strategy.Strategy( **data['INFO'])
-            df = data['DF']
-            print(stock.detect_signals_multithread(df))
-            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe[2])
             
+            df = pl.from_pandas(df, include_index=True)
+
+            best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
+            print(symbol, timeframe)
+            if strategy.what_is_signal(backtest_res): # returns true for buy and false for sale else None
+                pass
             # for res in backtest_res:
-            #     if res['strategy_func'] == best:
-            #         plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
-            #     print(res['performance'], res['risk_metrics'])
-                
+
+                # if res['strategy_func'] == best:
+                #     res['fig'].show()
+                    # plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
+                # if( res['risk_metrics']['roi'] > 0) and res['signals']:
+                    # print(f"{res['strategy_func']},--- {res['performance']},--- {res['risk_metrics']}")
+                # signals = res['signals']
+                # print(signals.filter(signals['Buy_Signal'] == True,
+                # signals['Sell_Signal'] == True))
             
             
-            break
+            
      
-        break
+        
                 
 
     

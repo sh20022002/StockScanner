@@ -1,4 +1,3 @@
-import random
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -50,7 +49,7 @@ class Strategy:
         self.max_drawdown = 0
         
         # Loss and profit percent logic based on risk tolerance
-        self.loss_percent = 5 if self.risk_tolerance < 80 else 7
+        self.loss_percent = 3 if self.risk_tolerance < 80 else 7
         self.profit_percent = None if self.risk_tolerance < 80 else 10
         
         
@@ -109,8 +108,8 @@ class Strategy:
                     if performance is None:
                         continue
                     
-                    # fig = plots.plot_stock(df, self.symbol, df.columns, signals=signals, show='no', interval=timeframe)
-                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics, 'signals': signals})
+                    fig = plots.plot_stock(df, self.symbol, df.columns, signals=signals, show='no', interval=timeframe)
+                    backtest_res.append({'strategy_func': strategy_func, 'performance': performance, 'risk_metrics': risk_metrics, 'signals': signals, 'fig': fig})
 
                     # Check if this strategy has the best performance
                     if performance > best_performance:
@@ -124,7 +123,7 @@ class Strategy:
         
 
 
-    def backtest_strategy(self, df: pl.DataFrame, signals_df: pl.DataFrame, transaction_cost: float = 0, tax_on_profit: float = 0.25, stop_loss_percent=None, stop_profit_percent=None) -> tuple:
+    def backtest_strategy(self, df: pl.DataFrame, signals_df: pl.DataFrame, transaction_cost: float = 0.01, tax_on_profit: float = 0, stop_loss_percent=None, stop_profit_percent=None) -> tuple:
         """
         Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
 
@@ -151,8 +150,8 @@ class Strategy:
         highest_price = 0.0  # Track the highest price since buying for trailing stop-loss
 
         # Convert Polars DataFrame to list of dictionaries for efficient iteration
-        df_records = df.select(['Close', 'DateTime']).to_dict(as_series=False)
-        signals_records = signals_df.select(['Buy_Signal', 'Sell_Signal', 'DateTime']).to_dict(as_series=False)
+        df_records = df.select(['Close', 'Datetime']).to_dict(as_series=False)
+        signals_records = signals_df.select(['Buy_Signal', 'Sell_Signal', 'Datetime']).to_dict(as_series=False)
 
         # Iterate over each row
         for i in range(len(df_records)):
@@ -160,8 +159,12 @@ class Strategy:
             buy_signal = signals_records['Buy_Signal'][i]
             sell_signal = signals_records['Sell_Signal'][i]
 
+            # skips false value -- contredict stoploss and take profit
+            if not buy_signal and not sell_signal:
+                continue
+
             # Buy logic
-            if buy_signal and cash > 0:
+            elif buy_signal and cash > 0:
                 position = cash / current_price  # Buy as many shares as possible
                 entry_price = current_price  # Set entry price
                 cash = 0.0  # All cash used
@@ -228,14 +231,14 @@ class Strategy:
 
         # Final calculations
         final_cash = cash + (position * df_records['Close'][-1] if position > 0 else 0.0)  # Cash value at end
-        win_rate = 0.0 if (winning_trades == 0 or total_trades == 0) else (winning_trades / total_trades) * 100  # Percentage
+        win_rate = 0.0 if winning_trades == 0 else (winning_trades / total_trades) * 100  # Percentage
         performance = final_cash - starting_cash  # Total profit/loss
-        timeframe_days = (df_records['DateTime'][-1] - df_records['DateTime'][0]).days
+        timeframe_days = (df_records['Datetime'][-1] - df_records['Datetime'][0]).days
         roi = ((final_cash - starting_cash) / starting_cash) * 100  # Return on investment
 
         # Risk metrics to return
         risk_metrics = {
-            'max_drawdown': round(max_drawdown * 100, 2),  # Percentage
+            # 'max_drawdown': round(max_drawdown * 100, 2),  # Percentage
             'win_rate': round(win_rate, 2),                # Percentage
             'time_frame_days': timeframe_days,
             'roi': round(roi, 2)                           # Percentage
@@ -318,7 +321,7 @@ class Strategy:
    
 
 
-    def detect_signals_multithread(self, df: pd.DataFrame, threshold=2) -> dict:
+    def detect_signals_multithread(self, df: pl.DataFrame, threshold=2) -> dict:
         """
         Detects buy and sell signals using multiple trading strategies with multithreading.
         Works with both live stock data and historical stock data.
@@ -340,7 +343,7 @@ class Strategy:
             for strategy_name, result_df in results.items():
                 if result_df is not None:
                     # Align signals with the main DataFrame
-                    result_df = result_df.join(df.select(['DateTime']), on='DateTime', how='left').fill_null(False)
+                    result_df = result_df.join(df.select(['Datetime']), on='Datetime', how='left').fill_null(False)
                     
                     # Aggregate signals
                     buy_signals = buy_signals + result_df['Buy_Signal'].cast(pl.Int32)
@@ -354,13 +357,13 @@ class Strategy:
             combined_signals_df = pl.DataFrame({
                 'Buy_Signal': final_buy_signal,
                 'Sell_Signal': final_sell_signal,
-                'DateTime': df['DateTime']
+                'DateTime': df['Datetime']
             })
 
             return combined_signals_df
 
         # convert df to polars
-        df = pl.from_pandas(df, include_index=True)
+        # df = pl.from_pandas(df, include_index=True)
        
 
         if df is None or df.is_empty():
@@ -399,27 +402,50 @@ class Strategy:
 
 
     def macd(self, df: pl.DataFrame) -> pl.DataFrame:
-
-        required_columns = ['MACD', 'MACD_Signal']
+        """MACD (Moving Average Convergence Divergence)
+        What It Is: A trend-following momentum indicator that shows the relationship between two moving averages of a security's price.
+        Key Components:
+        MACD Line: The difference between the 12-period EMA and 26-period EMA.
+        Signal Line: A 9-period EMA of the MACD line.
+        Histogram: The difference between the MACD line and the Signal line.
+        How It Works:
+        A buy signal occurs when the MACD line crosses above the Signal line.
+        A sell signal occurs when the MACD line crosses below the Signal line.
+        Use Case: Identify momentum shifts, trend direction, and potential entry/exit points.
+        """
+        required_columns = ['MACD', 'MACD_Signal', 'Datetime']
         if not all(col in df.columns for col in required_columns):
             print("Required columns for MACD strategy are missing.")
             return None
 
         try:
+            # Create buy signals where MACD crosses above the MACD Signal line
             buy_signals = (df['MACD'] > df['MACD_Signal']) & (df['MACD'].shift(1) <= df['MACD_Signal'].shift(1))
-
-            # Sell signal when MACD crosses below the signal line
+            # Create sell signals where MACD crosses below the MACD Signal line
             sell_signals = (df['MACD'] < df['MACD_Signal']) & (df['MACD'].shift(1) >= df['MACD_Signal'].shift(1))
+
+            # Fill null values with False directly
+            buy_signals = buy_signals.fill_null(False)
+            sell_signals = sell_signals.fill_null(False)
+
+            # Assuming generate_signal is defined somewhere else that generates the final DataFrame based on these signals
+            return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
+
         except Exception as e:
+            print(f"An error occurred: {e}")
             return None
-    
-        
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
         
-    def rsi(self, df: pl.DataFrame, Upper_Band=60, Lower_Band=30) -> pl.DataFrame:
+    def rsi(self, df: pl.DataFrame, Upper_Band=70, Lower_Band=35) -> pl.DataFrame:
         """
         Calculates the Relative Strength Index (RSI) signals.
+        RSI (Relative Strength Index)
+        What It Is: A momentum oscillator that measures the speed and change of price movements, ranging from 0 to 100.
+        How It Works:
+        Overbought Condition: RSI > 70, indicating the asset may be overvalued and due for a correction.
+        Oversold Condition: RSI < 30, indicating the asset may be undervalued and due for a bounce.
+        Use Case: Identify overbought or oversold conditions to time entries or exits.
+
         
         Args:
             df (pd.DataFrame): The historical price data.
@@ -431,11 +457,23 @@ class Strategy:
         buy_signals = (df['RSI'] < Lower_Band) & (df['RSI'].shift(1) >= Lower_Band)
         sell_signals = (df['RSI'] > Upper_Band) & (df['RSI'].shift(1) <= Upper_Band)
 
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
         
     def ma(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates the Moving Average (MA) signals.
+        What It Is: A smoothing indicator that calculates the average price of a security over a specified time period.
+        Types:
+        Simple Moving Average (SMA): A straight average of prices over a period.
+        Exponential Moving Average (EMA): A moving average that gives more weight to recent prices.
+        How It Works:
+        If the price is above the MA, it indicates a bullish trend.
+        If the price is below the MA, it indicates a bearish trend.
+        Use Case: Identify the direction of the trend and potential support/resistance levels
         
         Args:
             df (pd.DataFrame): The historical price data.
@@ -443,18 +481,35 @@ class Strategy:
         Returns:
             tuple: The buy and sell signals.
         """
+        # deal with a type error recast the column to the dataframe as a float 64
+        df = df.with_columns(
+            pl.col("SMA150").cast(pl.Float64, strict=False).alias("SMA150"))
+
         buy_signals = (df['SMA20'] > df['SMA150']) & (df['SMA20'].shift(1) <= df['SMA150'].shift(1))
         sell_signals = (df['SMA20'] < df['SMA150']) & (df['SMA20'].shift(1) >= df['SMA150'].shift(1))
-       
+
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
-    def bollinger_bands(self, df: pl.DataFrame, window: int = 20, num_std_dev=2) -> pl.DataFrame:
+    def bollinger_bands(self, df: pl.DataFrame, window: int = 20, num_std_dev=3) -> pl.DataFrame:
         """
         Calculates the Bollinger Bands signals.
+        Bollinger Bands
+        What It Is: A volatility indicator consisting of a middle band (SMA) and two outer bands (standard deviations above and below the SMA).
+        How It Works:
+        Buy Signal: When the price touches or crosses the lower band and reverses upward.
+        Sell Signal: When the price touches or crosses the upper band and reverses downward.
+        Breakout: Significant price movement when the bands contract (low volatility).
+        Use Case: Identify periods of high/low volatility and potential price reversals or breakouts.
         """
 
         # Calculate Bollinger Bands
-        df = df.select(pl.col('Close').rolling_std(window).alias('STD20'))
+        df = df.with_columns(
+            pl.col('Close').rolling_std(window_size=window).alias('STD20')
+)
 
         # Step 2: Drop rows where 'SMA20' or 'STD20' have NaN values
         df = df.filter(
@@ -462,21 +517,25 @@ class Strategy:
         )
 
         # Step 3: Create 'Upper_Band' and 'Lower_Band'
-        df = df.select([
+        df = df.with_columns([
             (pl.col('SMA20') + (pl.col('STD20') * num_std_dev)).alias('Upper_Band'),
             (pl.col('SMA20') - (pl.col('STD20') * num_std_dev)).alias('Lower_Band')
         ])
-
-        # Step 4: Generate buy and sell signals
+        
+            # Step 4: Generate buy and sell signals
         buy_signals = (
-            (pl.col('Close') < pl.col('Lower_Band')) &
-            (pl.col('Close').shift(1) >= pl.col('Lower_Band').shift(1))
+            (df['Close'] < df['Lower_Band']) &
+            (df['Close'].shift(1) >= df['Lower_Band'].shift(1))
         )
 
         sell_signals = (
-            (pl.col('Close') > pl.col('Upper_Band')) &
-            (pl.col('Close').shift(1) <= pl.col('Upper_Band').shift(1))
-        )
+            (df['Close'] > df['Upper_Band']) &
+            (df['Close'].shift(1) <= df['Upper_Band'].shift(1))
+            )
+
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
@@ -484,24 +543,41 @@ class Strategy:
     def ema_crossover(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates the Exponential Moving Average Crossover signals.
+        Exponential Moving Average (EMA): A moving average that gives more weight to recent prices.
+        How It Works:
+        If the price is above the MA, it indicates a bullish trend.
+        If the price is below the MA, it indicates a bearish trend.
+        Use Case: Identify the direction of the trend and potential support/resistance levels
 
         Args:
-            df (pd.DataFrame): The historical price data.
+            df (pl.DataFrame): The historical price data.
 
         Returns:
-            pd.DataFrame: The buy and sell signals.
+            pl.DataFrame: The buy and sell signals.
         """
-        df.dropna(subset=['EMA12', 'EMA26'], inplace=True)
+        df = df.filter(pl.col('EMA12').is_not_null() & pl.col('EMA26').is_not_null())
 
         # Generate buy and sell signals
         buy_signals = (df['EMA12'] > df['EMA26']) & (df['EMA12'].shift(1) <= df['EMA26'].shift(1))
         sell_signals = (df['EMA12'] < df['EMA26']) & (df['EMA12'].shift(1) >= df['EMA26'].shift(1))
 
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
-    def stochastic_oscillator(self, df: pl.DataFrame, k_window=14, d_window=3, overbought=80, oversold=20) -> pl.DataFrame:
+    def stochastic_oscillator(self, df: pl.DataFrame, k_window=12, d_window=3, overbought=80, oversold=30) -> pl.DataFrame:
         """
         Calculates the Stochastic Oscillator signals.
+        What It Is: A momentum indicator that compares the closing price of a security to its price range over a specific period.
+        How It Works:
+        Overbought Condition: When the oscillator is above 80.
+        Oversold Condition: When the oscillator is below 20.
+        Buy Signal: %K crosses above %D in the oversold zone.
+        Sell Signal: %K crosses below %D in the overbought zone.
+        Use Case: Identify overbought/oversold conditions and potential reversals.
+
 
         Args:
             df (pd.DataFrame): The historical price data.
@@ -532,27 +608,39 @@ class Strategy:
             return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], index=df['Datetime'])
 
         # Sort the DataFrame by index to ensure chronological order
-        df.sort_index(inplace=True)
+        df.sort('Datetime')
 
         # Calculate %K (stochastic)
-        df['Lowest_Low'] = df['Low'].rolling(window=k_window, min_periods=1).min().astype('float32')
-        df['Highest_High'] = df['High'].rolling(window=k_window, min_periods=1).max().astype('float32')
-        df['Denominator'] = (df['Highest_High'] - df['Lowest_Low']).astype('float32')
+        df = df.with_columns(
+            df['Low'].rolling_min(window_size=k_window, min_periods=1).cast(pl.Float32).alias('Lowest_Low'),
+            df['High'].rolling_max(window_size=k_window, min_periods=1).cast(pl.Float32).alias('Highest_High'))
+        
+        df = df.with_columns((
+            df['Highest_High'] - df['Lowest_Low']).cast(pl.Float32).alias('Denominator'))
 
         # Avoid division by zero
-        df['Denominator'].replace(0, np.nan, inplace=True)
-        df['%K'] = (((df['Close'] - df['Lowest_Low']) / df['Denominator']) * 100).astype('float32')
-        df['%K'].fillna(0, inplace=True)  # Handle NaN values resulting from division by zero
+        df = df.with_columns(
+            pl.when(pl.col("Denominator") == 0)
+            .then(None)  # Replace 0 with null
+            .otherwise(pl.col("Denominator"))  # Keep other values unchanged
+            
+            .alias("Denominator"))  # Update the column
+        # Handle NaN values resulting from division by zero
+        df = df.with_columns((((df['Close'] - df['Lowest_Low'])/ df['Denominator']) * 100).cast(pl.Float32).fill_nan(0).alias('%K'))
 
         # Calculate %D (signal line)
-        df['%D'] = df['%K'].rolling(window=d_window, min_periods=1).mean().astype('float32')
+        df = df.with_columns(df['%K'].rolling_mean(window_size=d_window, min_periods=1).cast(pl.Float32).alias('%D'))
 
         # Generate buy and sell signals
         buy_signals = (df['%K'] < oversold) & (df['%K'].shift(1) >= oversold)
         sell_signals = (df['%K'] > overbought) & (df['%K'].shift(1) <= overbought)
 
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+
         # Clean up temporary columns
-        df.drop(columns=['Lowest_Low', 'Highest_High', 'Denominator', '%K', '%D'], inplace=True)
+        df.drop('Lowest_Low', 'Highest_High', 'Denominator', '%K', '%D')
 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
@@ -561,6 +649,13 @@ class Strategy:
     def parabolic_sar(self, df: pl.DataFrame, step=0.02, max_step=0.2) -> pl.DataFrame:
         """
         Calculates the Parabolic SAR signals.
+        Parabolic SAR (Stop and Reverse)
+        What It Is: A trend-following indicator that places points above or below the price, depending on the trend.
+        How It Works:
+        Buy Signal: When the dots move below the price.
+        Sell Signal: When the dots move above the price.
+        Use Case: Identify trends and reversal points. It is also used for trailing stop-losses.
+
 
         Args:
             df (pl.DataFrame): The historical price data.
@@ -624,11 +719,16 @@ class Strategy:
         # Generate buy and sell signals
         
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
+        return generate_signal(sell_signals, buy_signals, df['Datetime'].to_list())
 
     def atr_breakout(self, df: pl.DataFrame, window=14, multiplier=1.2) -> pl.DataFrame:
         """
         Calculates the ATR breakout signals.
+        What It Is: A volatility indicator that measures the average range of price movement over a period.
+        How It Works:
+        Use ATR to set dynamic stop-loss and take-profit levels.
+        Breakout Strategy: Buy when the price moves above a predefined level based on the ATR, and sell when it moves below a similar level.
+        Use Case: Trade based on volatility and manage risk effectively.
 
         Args:
             df (pl.DataFrame): The historical price data.
@@ -653,12 +753,20 @@ class Strategy:
         buy_signals = (df['Close'] > df['Upper_Breakout'].shift(1))
         sell_signals = (df['Close'] < df['Lower_Breakout'].shift(1))
 
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def donchian_channel(self, df: pl.DataFrame, window=20) -> pl.DataFrame:
         """
         Calculates the Donchian Channel breakout signals.
+        What It Is: A volatility indicator that plots the highest high and lowest low over a specific period.
+        How It Works:
+        Buy Signal: When the price breaks above the upper band.
+        Sell Signal: When the price breaks below the lower band.
+        Use Case: Identify breakouts and trends.
 
         Args:
             df (pl.DataFrame): The historical price data.
@@ -674,21 +782,32 @@ class Strategy:
 
         # Calculate Donchian Channel
         df = df.with_columns([
-            pl.col('High').rolling_max(window=window).alias('Donchian_High'),
-            pl.col('Low').rolling_min(window=window).alias('Donchian_Low')
+            df['High'].rolling_max(window_size=window).alias('Donchian_High'),
+            df['Low'].rolling_min(window_size=window).alias('Donchian_Low')
         ])
 
         # Generate buy and sell signals
         buy_signals = (df['Close'] > df['Donchian_High'].shift(1))
         sell_signals = (df['Close'] < df['Donchian_Low'].shift(1))
 
-        
-
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+ 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
     def ichimoku_cloud(self, df: pl.DataFrame, conversion_window=9, base_window=26, leading_span_window=52) -> pl.DataFrame:
         """
         Calculates the Ichimoku Cloud signals.
+        What It Is: A comprehensive indicator providing trend direction, momentum, and support/resistance levels.
+        Key Components:
+        Tenkan-Sen (Conversion Line) and Kijun-Sen (Base Line): Act like fast and slow moving averages.
+        Senkou Span A/B (Cloud): The shaded area between them represents support/resistance and trend direction.
+        Chikou Span (Lagging Line): Represents past price action.
+        How It Works:
+        Buy Signal: When the price is above the cloud and the Conversion Line crosses above the Base Line.
+        Sell Signal: When the price is below the cloud and the Conversion Line crosses below the Base Line.
+        Use Case: Identify trends, reversals, and support/resistance levels.
 
         Args:
             df (pl.DataFrame): The historical price data.
@@ -705,26 +824,34 @@ class Strategy:
             return pl.DataFrame(columns=['Buy_Signal', 'Sell_Signal'], schema=[('Buy_Signal', pl.Boolean), ('Sell_Signal', pl.Boolean), ('DateTime', pl.Datetime)])
 
         # Calculate Ichimoku components
-        df = df.with_columns([
-            ((pl.col('High').rolling_max(window=conversion_window) + pl.col('Low').rolling_min(window=conversion_window)) / 2).alias('Conversion_Line'),
-            ((pl.col('High').rolling_max(window=base_window) + pl.col('Low').rolling_min(window=base_window)) / 2).alias('Base_Line'),
-            (((pl.col('Conversion_Line') + pl.col('Base_Line')) / 2).shift(base_window)).alias('Leading_Span_A'),
-            ((pl.col('High').rolling_max(window=leading_span_window) + pl.col('Low').rolling_min(window=leading_span_window)) / 2).shift(base_window).alias('Leading_Span_B')
-        ])
+        df = df.with_columns(
+            (df['High'].rolling_max(window_size=conversion_window) + df['Low'].rolling_min(window_size=conversion_window) / 2).alias('Conversion_Line'),
+            (df['High'].rolling_max(window_size=base_window) + df['Low'].rolling_min(window_size=base_window) / 2).alias('Base_Line'))
 
-        # Generate buy and sell signals
-        buy_signals = (df['Close'] > df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1)) & \
-                    (df['Close'].shift(1) <= df[['Leading_Span_A', 'Leading_Span_B']].max(axis=1).shift(1))
+        df = df.with_columns(((df['Conversion_Line'] + df['Base_Line']) / 2).shift(base_window).alias('Leading_Span_A'),
+            ((df['High'].rolling_max(window_size=leading_span_window) + df['Low'].rolling_min(window_size=leading_span_window)) / 2).shift(base_window).alias('Leading_Span_B'))
 
-        sell_signals = (df['Close'] < df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1)) & \
-                    (df['Close'].shift(1) >= df[['Leading_Span_A', 'Leading_Span_B']].min(axis=1).shift(1))
+        # Generate buy and sell signals and fill null values
+        df = df.with_columns(
+            ((df["Close"] > pl.max_horizontal(["Leading_Span_A", "Leading_Span_B"])) &
+            (df["Close"].shift(1) <= pl.max_horizontal(["Leading_Span_A", "Leading_Span_B"])).shift(1))
+        .fill_null(False).alias('buy_signals'))
 
+        df = df.with_columns(
+            ((df["Close"] < pl.min_horizontal(["Leading_Span_A", "Leading_Span_B"])) &
+            (df["Close"].shift(1) >= pl.min_horizontal(["Leading_Span_A", "Leading_Span_B"])).shift(1))
+        .fill_null(False).alias('sell_signals'))
 
-        return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
+        return generate_signal(df['sell_signals'].to_list(), df['buy_signals'].to_list(), df['Datetime'].to_list())
 
     def vwap(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Calculates VWAP (Volume Weighted Average Price) buy and sell signals.
+        What It Is: A trading benchmark that calculates the average price of a security based on both price and volume.
+        How It Works:
+        If the price is above VWAP, it indicates a bullish trend.
+        If the price is below VWAP, it indicates a bearish trend.
+        Use Case: Commonly used by institutional traders to ensure they buy/sell at favorable prices relative to the average market price
         
         Args:
             df (pd.DataFrame): The historical price data with volume information.
@@ -733,13 +860,19 @@ class Strategy:
             pd.DataFrame: The buy and sell signals.
         """
         # Calculate VWAP
-        df['Cumulative_Price_Vol'] = (df['Close'] * df['Volume']).cumsum()
-        df['Cumulative_Vol'] = df['Volume'].cumsum()
-        df['VWAP'] = df['Cumulative_Price_Vol'] / df['Cumulative_Vol']
+        df = df.with_columns((df['Close'] * df['Volume']).cum_sum().alias('Cumulative_Price_Vol'),
+            df['Volume'].cum_sum().alias('Cumulative_Vol'))
+
+        df = df.with_columns((df['Cumulative_Price_Vol'] / df['Cumulative_Vol']).alias('VWAP'))
 
         # Buy and sell signals
-        buy_signals = (df['Close'] > df['VWAP']) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
-        sell_signals = (df['Close'] < df['VWAP']) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
+        # 0.98 an
+        buy_signals = (df['Close'] > df['VWAP']*0.98) & (df['Close'].shift(1) <= df['VWAP'].shift(1))
+        sell_signals = (df['Close'] < df['VWAP']*0.90) & (df['Close'].shift(1) >= df['VWAP'].shift(1))
+
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
 
@@ -763,7 +896,40 @@ def generate_signal(sell_signals: list, buy_signals: list, indexs: list) -> pl.D
     signals_df = pl.DataFrame({
         'Buy_Signal': buy_signals,
         'Sell_Signal': sell_signals,
-        'DateTime': indexs
+        'Datetime': indexs
     })
 
     return signals_df
+
+def what_is_signal(best, backtest_res):
+    num_of_sell = 0
+    num_of_buy = 0
+    roi_sum = 0.0
+    # functions = [] # optinal for best strategy logic
+
+    for res in backtest_res:
+        sig = res['signals']
+        if not sig['Buy_Signal'][-1] and not sig['Sell_Signal'][-1]:
+            # if no true signals skips algo function 
+            # else has one true if not buy than sell
+            continue
+        else:
+            roi_sum += res['risk_metrics']['roi']
+            # functions.append(res['strategy_func'])
+            if sig['Buy_Signal'][-1]:
+                num_of_buy += 1
+
+            else:
+                num_of_sell += 1
+        # make sure there is no divsion by 0 error 
+        roi_sum = 0 if roi_sum == 0 or (num_of_buy + num_of_sell) == 0 else roi_sum / (num_of_buy + num_of_sell)
+        
+        if roi_sum > 0:
+            # if buy signal 
+            if num_of_buy - num_of_sell > 0:
+                return True
+            # if sell signal 
+            else:
+                return False
+        # if roi < 1 or no signals
+        return None

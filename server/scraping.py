@@ -18,9 +18,14 @@ def current_stock_price(symbol):
     Returns:
     - float: The current stock price.
     '''
-    df = yf.Ticker(symbol).history(period='1h')
-    return df['Close'].iloc[-1]
-
+    try:
+        df = yf.Ticker(symbol).history(period='1h')
+        c_price = df['Close'].iloc[-1]
+    # error geting data returns 1 should skip this stock
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+        # raise EOFError
 
 def get_stock_data(
     stock,
@@ -65,7 +70,7 @@ def get_stock_data(
     elif interval == '2m' and DAYS > 60:
         DAYS = 60
     elif interval == '1h' and DAYS > 729:
-        DAYS = 729
+        DAYS = 728
 
     # Fetch current date
     end_date = get_exchange_time()

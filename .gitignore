@@ -1,4 +1,10 @@
-env
+
+venv/
 __pycache__
 server/DockerFile.server
-
+.vscode
+APPL1m.csv
+all_requirements.txt
+venv/Lib/site-packages/polars/polars.pyd
+env/ 
+venv/ 
