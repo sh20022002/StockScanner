@@ -34,9 +34,9 @@ def run_trading_while_market_is_open(fivem=300):
 
     while True: #scraping.is_nyse_open():  
 
-        for symbol in scraping.get_tickers():
+        for symbol in ['AAPL', 'AMZN', 'META', 'MSFT', 'NVDA', 'PYPL', 'BAC', 'CSCO', 'GOOG', 'COST', 'MS', 'UPST', 'TSM', 'ANF', 'IBM', 'PANW', 'HOOD']:
 
-            symbol = symbol[0]
+            # symbol = symbol[0]
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
             #    'Headquarters Location', 'Date added', 'CIK', 'Founded']
             try:
@@ -59,8 +59,8 @@ def run_trading_while_market_is_open(fivem=300):
 
             best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
             print(symbol, timeframe)
-            if strategy.what_is_signal(backtest_res): # returns true for buy and false for sale else None
-                pass
+            if strategy.what_is_signal(best, backtest_res, 4): # returns true for buy and false for sale else None
+                print(f'buy {symbol}')
             # for res in backtest_res:
 
                 # if res['strategy_func'] == best:
@@ -72,7 +72,7 @@ def run_trading_while_market_is_open(fivem=300):
                 # print(signals.filter(signals['Buy_Signal'] == True,
                 # signals['Sell_Signal'] == True))
             
-            
+        
             
      
         
