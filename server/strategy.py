@@ -875,86 +875,7 @@ class Strategy:
         sell_signals = sell_signals.fill_null(False)
 
         return generate_signal(sell_signals.to_list(), buy_signals.to_list(), df['Datetime'].to_list())
-    def find_local_extremes(prices):# test
-        """Find local highs and lows in the price data.
-        Returns two lists of tuples: (index, price) for highs and lows."""
-        highs = []
-        lows = []
-        for i in range(1, len(prices)-1):
-            if prices[i] > prices[i-1] and prices[i] > prices[i+1]:
-                highs.append((i, prices[i]))
-            elif prices[i] < prices[i-1] and prices[i] < prices[i+1]:
-                lows.append((i, prices[i]))
-        return highs, lows
 
-    def fit_line(points):# test
-        """Fit a line to a set of points using linear regression.
-        Points: list of (x, y) tuples.
-        Returns slope (m), intercept (c)."""
-        if len(points) == 0:
-            # No points to fit a line
-            return 0, 0
-        if len(points) == 1:
-            # Only one point, slope=0, line at that point's price
-            return 0, points[0][1]
-        x_vals = np.array([p[0] for p in points])
-        y_vals = np.array([p[1] for p in points])
-        m, c = np.polyfit(x_vals, y_vals, 1)  # 1st degree polynomial (linear)
-        return m, c
-
-    def get_trend_line_value(m, c, x):# test
-        """Get the y-value (price) of the line at index x."""
-        return m * x + c
-
-    def determine_signal_from_trend_lines_polars(df: pl.DataFrame, upper_threshold_percent: float, lower_threshold_percent: float):# test
-        """
-        Determine a buy/sell/none signal based on trend lines from a Polars DataFrame.
-        The DataFrame must have: 'datetime', 'open', 'high', 'low', 'close'.
-
-        Parameters:
-        - df: A Polars DataFrame with OHLC data.
-        - upper_threshold_percent: The percentage threshold for sell signals (distance to upper trend line).
-        - lower_threshold_percent: The percentage threshold for buy signals (distance to lower trend line).
-
-        Returns: "Buy", "Sell", or None.
-        """
-        # Extract close prices as a list
-        prices = df["close"].to_list()
-
-        # 1. Identify highs and lows (local extremes)
-        highs, lows = find_local_extremes(prices)
-
-        # If we do not have any highs or lows, return None
-        if not highs or not lows:
-            return None
-
-        # 2. Fit trend lines for highs and lows
-        m_up, c_up = fit_line(highs)
-        m_down, c_down = fit_line(lows)
-
-        # 3. Calculate current distances
-        current_index = len(prices) - 1
-        current_price = prices[-1]
-        upper_line_price = get_trend_line_value(m_up, c_up, current_index)
-        lower_line_price = get_trend_line_value(m_down, c_down, current_index)
-
-        if current_price == 0:
-            return None
-
-        dist_to_upper = ((upper_line_price - current_price) / current_price) * 100.0
-        dist_to_lower = ((current_price - lower_line_price) / current_price) * 100.0
-
-        # 4. Determine signals
-        # If the current price is near the upper trend line (within upper_threshold_percent), consider Sell.
-        if dist_to_upper >= 0 and dist_to_upper <= upper_threshold_percent:
-            return "Sell"
-
-        # If the current price is near the lower trend line (within lower_threshold_percent), consider Buy.
-        if dist_to_lower >= 0 and dist_to_lower <= lower_threshold_percent:
-            return "Buy"
-
-        # Otherwise, no signal.
-        return None
 
 def generate_signal(sell_signals: list, buy_signals: list, indexs: list) -> pl.DataFrame:
     """
@@ -1035,4 +956,85 @@ def what_is_signal(best, backtest_res, n):
             return False  # More sell signals or equal number of signals, with positive ROI
 
     # If average ROI is not positive, return None
+    return None
+
+def find_local_extremes(prices):# test
+    """Find local highs and lows in the price data.
+    Returns two lists of tuples: (index, price) for highs and lows."""
+    highs = []
+    lows = []
+    for i in range(1, len(prices)-1):
+        if prices[i] > prices[i-1] and prices[i] > prices[i+1]:
+            highs.append((i, prices[i]))
+        elif prices[i] < prices[i-1] and prices[i] < prices[i+1]:
+            lows.append((i, prices[i]))
+    return highs, lows
+
+def fit_line(points):# test
+    """Fit a line to a set of points using linear regression.
+    Points: list of (x, y) tuples.
+    Returns slope (m), intercept (c)."""
+    if len(points) == 0:
+        # No points to fit a line
+        return 0, 0
+    if len(points) == 1:
+        # Only one point, slope=0, line at that point's price
+        return 0, points[0][1]
+    x_vals = np.array([p[0] for p in points])
+    y_vals = np.array([p[1] for p in points])
+    m, c = np.polyfit(x_vals, y_vals, 1)  # 1st degree polynomial (linear)
+    return m, c
+
+def get_trend_line_value(m, c, x):# test
+    """Get the y-value (price) of the line at index x."""
+    return m * x + c
+
+def determine_signal_from_trend_lines_polars(df: pl.DataFrame, upper_threshold_percent=30.0 , lower_threshold_percent=20.0):# test
+    """
+    Determine a buy/sell/none signal based on trend lines from a Polars DataFrame.
+    The DataFrame must have: 'datetime', 'open', 'high', 'low', 'close'.
+
+    Parameters:
+    - df: A Polars DataFrame with OHLC data.
+    - upper_threshold_percent: The percentage threshold for sell signals (distance to upper trend line).
+    - lower_threshold_percent: The percentage threshold for buy signals (distance to lower trend line).
+
+    Returns: "Buy", "Sell", or None.
+    """
+    # Extract close prices as a list
+    prices = df["close"].to_list()
+
+    # 1. Identify highs and lows (local extremes)
+    highs, lows = find_local_extremes(prices)
+
+    # If we do not have any highs or lows, return None
+    if not highs or not lows:
+        return None
+
+    # 2. Fit trend lines for highs and lows
+    m_up, c_up = fit_line(highs)
+    m_down, c_down = fit_line(lows)
+
+    # 3. Calculate current distances
+    current_index = len(prices) - 1
+    current_price = prices[-1]
+    upper_line_price = get_trend_line_value(m_up, c_up, current_index)
+    lower_line_price = get_trend_line_value(m_down, c_down, current_index)
+
+    if current_price == 0:
+        return None
+
+    dist_to_upper = ((upper_line_price - current_price) / current_price) * 100.0
+    dist_to_lower = ((current_price - lower_line_price) / current_price) * 100.0
+
+    # 4. Determine signals
+    # If the current price is near the upper trend line (within upper_threshold_percent), consider Sell.
+    if dist_to_upper >= 0 and dist_to_upper <= upper_threshold_percent:
+        return "Sell"
+
+    # If the current price is near the lower trend line (within lower_threshold_percent), consider Buy.
+    if dist_to_lower >= 0 and dist_to_lower <= lower_threshold_percent:
+        return "Buy"
+
+    # Otherwise, no signal.
     return None
