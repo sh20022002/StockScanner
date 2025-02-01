@@ -1,9 +1,10 @@
-import scraping, database
+import scraping, database, avg
 import time
 from datetime import datetime
 import strategy #, plots, signal
 import polars as pl
 import polars.selectors as cs
+# import model_rgb 
 
 
 def chack_data():
@@ -34,7 +35,7 @@ def run_trading_while_market_is_open(fivem=300):
 
     while True: #scraping.is_nyse_open():  
 
-        for symbol in ['AAPL', 'AMZN', 'META', 'MSFT', 'NVDA', 'PYPL', 'BAC', 'CSCO', 'GOOG', 'COST', 'MS', 'UPST', 'TSM', 'ANF', 'IBM', 'PANW', 'HOOD']:
+        for symbol in ['AAPL']: #, 'AMZN', 'META', 'MSFT', 'NVDA', 'PYPL', 'BAC', 'CSCO', 'GOOG', 'COST', 'MS', 'UPST', 'TSM', 'ANF', 'IBM', 'PANW', 'HOOD']:
 
             # symbol = symbol[0]
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
@@ -56,22 +57,14 @@ def run_trading_while_market_is_open(fivem=300):
 
             
             df = pl.from_pandas(df, include_index=True)
-
-            best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
-            print(symbol, timeframe)
-            if strategy.what_is_signal(best, backtest_res, 4): # returns true for buy and false for sale else None
-                print(f'buy {symbol}')
-            # for res in backtest_res:
-
-                # if res['strategy_func'] == best:
-                #     res['fig'].show()
-                    # plots.plot_stock(df, stock.symbol, df.columns, signals=res['signals']).show()
-                # if( res['risk_metrics']['roi'] > 0) and res['signals']:
-                    # print(f"{res['strategy_func']},--- {res['performance']},--- {res['risk_metrics']}")
-                # signals = res['signals']
-                # print(signals.filter(signals['Buy_Signal'] == True,
-                # signals['Sell_Signal'] == True))
+            avg.find_avg(df)
+            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
             
+            # print(symbol, timeframe)
+            # if strategy.what_is_signal(best, backtest_res, 4): # returns true for buy and false for sale else None
+            #     print(f'buy {symbol}')
+            
+        break
         
             
      

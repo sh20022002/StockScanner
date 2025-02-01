@@ -1,3 +1,5 @@
-vwap and stochastic_oscillator are the only indicaitors that return positive roi in 1d timframe
+distance from avg 20/50/100/150/200
+fit avg to stock
+figure when stock is on avg
 1. indicaitors need relaxation of the Thresholds
 2. no 1h data
