@@ -121,22 +121,24 @@ class Strategy:
         return best_strategy, backtest_res
 
         
-    def backtest_strategy_2(self, df: pl.DataFrame, signals_df: pl.DataFrame, 
-                      transaction_cost: float = 0.01, tax_on_profit: float = 0, 
-                      stop_loss_percent: float = None, stop_profit_percent: float = None, 
-                      leverage: float = 1) -> tuple:
+    def backtest_strategy(self, df: pl.DataFrame, signals_df: pl.DataFrame, 
+                        transaction_cost: float = 0.01, tax_on_profit: float = 0, 
+                        stop_loss_percent: float = None, stop_profit_percent: float = None, 
+                        leverage: float = 1, trailing_stop: bool = True) -> tuple:
         """
         Backtests a trading strategy that supports both long and short positions with leverage,
-        including optional moving stop-loss and stop-profit logic.
+        including optional trailing stop-loss and fixed stop-profit logic.
 
         Args:
             df (pl.DataFrame): Historical price data with columns ['Close', 'Datetime'].
             signals_df (pl.DataFrame): DataFrame of signals with columns ['Buy_Signal', 'Sell_Signal', 'Datetime'].
             transaction_cost (float): Transaction cost per trade.
             tax_on_profit (float): Tax on profit (not applied in this basic example).
-            stop_loss_percent (float, optional): Percentage for moving stop-loss trigger.
-            stop_profit_percent (float, optional): Percentage for stop-profit trigger.
+            stop_loss_percent (float, optional): Percentage for stop-loss trigger. 
+                When trailing_stop is True, this value is used to update the stop-loss as the trade moves in your favor.
+            stop_profit_percent (float, optional): Percentage for a fixed stop-profit trigger.
             leverage (float): Leverage multiplier (default=1, i.e. no leverage).
+            trailing_stop (bool): If True, the stop-loss level will adjust as favorable price moves occur.
 
         Returns:
             tuple: A tuple containing overall performance (profit/loss) and a dictionary of risk metrics.
@@ -148,7 +150,7 @@ class Strategy:
         position_type = None   # "long" or "short"
         entry_price = 0.0      # Price at which the current position was entered
         trade_cash = 0.0       # Cash allocated to the current trade
-        borrow_amount = 0.0    # Only used for long trades to simulate leverage borrowing
+        borrow_amount = 0.0    # For long trades, to simulate leverage borrowing
         highest_price = 0.0    # For trailing stop-loss on long positions
         lowest_price = 0.0     # For trailing stop-loss on short positions
         max_drawdown = 0.0
@@ -160,25 +162,25 @@ class Strategy:
         df_records = df.select(['Close', 'Datetime']).to_dict(as_series=False)
         signals_records = signals_df.select(['Buy_Signal', 'Sell_Signal', 'Datetime']).to_dict(as_series=False)
 
-        # Iterate over each record in the dataset.
+        # Iterate over each record.
         for i in range(len(df_records['Close'])):
             current_price = df_records['Close'][i]
             buy_signal = signals_records['Buy_Signal'][i]
             sell_signal = signals_records['Sell_Signal'][i]
 
-            # If no position is open, look for an entry signal.
+            # When no position is open, look for an entry signal.
             if position == 0:
                 if buy_signal:
                     # Open a long position.
                     trade_cash = cash
-                    borrow_amount = (leverage - 1) * trade_cash  # Additional funds borrowed
+                    borrow_amount = (leverage - 1) * trade_cash  # Borrow extra funds based on leverage
                     position = (leverage * trade_cash) / current_price
                     entry_price = current_price
                     position_type = "long"
                     cash = 0.0  # Fully allocated
-                    highest_price = current_price  # Initialize trailing stop for long
+                    highest_price = current_price  # Initialize for trailing stop
 
-                    # Set stop levels for long positions.
+                    # Set initial stop levels.
                     stop_loss_price = (entry_price * (1 - stop_loss_percent / 100)
                                     if stop_loss_percent is not None else None)
                     stop_profit_price = (entry_price * (1 + stop_profit_percent / 100)
@@ -188,36 +190,32 @@ class Strategy:
                 elif sell_signal:
                     # Open a short position.
                     trade_cash = cash
-                    # For short positions, we “sell short” using all available cash with leverage.
-                    position = - (leverage * trade_cash) / current_price  # Negative indicates a short
+                    position = - (leverage * trade_cash) / current_price  # Negative indicates a short position
                     entry_price = current_price
                     position_type = "short"
                     cash = 0.0
-                    lowest_price = current_price  # Initialize trailing stop for short
+                    lowest_price = current_price  # Initialize for trailing stop
 
-                    # Set stop levels for short positions.
-                    # For a short, stop-loss is triggered if price rises above a threshold.
+                    # Set initial stop levels for a short position.
                     stop_loss_price = (entry_price * (1 + stop_loss_percent / 100)
                                     if stop_loss_percent is not None else None)
-                    # And stop-profit (take profit) is triggered if price falls below a threshold.
                     stop_profit_price = (entry_price * (1 - stop_profit_percent / 100)
                                         if stop_profit_percent is not None else None)
                     total_trades += 1
 
             else:
-                # We have an open position.
+                # When a position is open:
                 if position_type == "long":
-                    # Update trailing stop for long positions.
-                    if current_price > highest_price:
+                    # Update trailing stop-loss if enabled.
+                    if trailing_stop and current_price > highest_price:
                         highest_price = current_price
                         if stop_loss_percent is not None:
                             stop_loss_price = highest_price * (1 - stop_loss_percent / 100)
 
-                    # Exit conditions for a long position:
+                    # Exit conditions for long positions.
                     if ((stop_loss_price is not None and current_price <= stop_loss_price) or
                         (stop_profit_price is not None and current_price >= stop_profit_price) or
                         sell_signal):
-                        # Calculate sale proceeds and repay the borrowed funds.
                         sell_value = position * current_price
                         cash = (sell_value - borrow_amount) * (1 - transaction_cost)
                         if current_price > entry_price:
@@ -226,18 +224,17 @@ class Strategy:
                         position_type = None
 
                 elif position_type == "short":
-                    # Update trailing stop for short positions.
-                    if current_price < lowest_price:
+                    # Update trailing stop-loss if enabled.
+                    if trailing_stop and current_price < lowest_price:
                         lowest_price = current_price
                         if stop_loss_percent is not None:
                             stop_loss_price = lowest_price * (1 + stop_loss_percent / 100)
 
-                    # Exit conditions for a short position:
+                    # Exit conditions for short positions.
                     if ((stop_loss_price is not None and current_price >= stop_loss_price) or
                         (stop_profit_price is not None and current_price <= stop_profit_price) or
                         buy_signal):
-                        # Cover the short.
-                        # The profit is: initial margin + (short sale proceeds - cost to cover)
+                        # Cover the short position.
                         cash = trade_cash + (leverage * trade_cash - (abs(position) * current_price))
                         cash *= (1 - transaction_cost)
                         if current_price < entry_price:
@@ -252,7 +249,7 @@ class Strategy:
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
 
-        # If a position remains open at the end, close it at the last available price.
+        # Close any open position at the final price.
         if position != 0:
             final_price = df_records['Close'][-1]
             if position_type == "long":
@@ -273,13 +270,14 @@ class Strategy:
             'win_rate': round(win_rate, 2),
             'time_frame_days': timeframe_days,
             'roi': round(roi, 2),
-            # 'max_drawdown': round(max_drawdown * 100, 2),  # Uncomment if needed
+            'max_drawdown': round(max_drawdown * 100, 2),  # Uncomment if desired
         }
 
-        return performance, risk_metrics
+        return performance, risk_metrics  
 
 
-    def backtest_strategy(self, df: pl.DataFrame, signals_df: pl.DataFrame, transaction_cost: float = 0.01, tax_on_profit: float = 0, stop_loss_percent=None, stop_profit_percent=None) -> tuple:
+
+    def backtest_strategy1(self, df: pl.DataFrame, signals_df: pl.DataFrame, transaction_cost: float = 0.01, tax_on_profit: float = 0, stop_loss_percent=None, stop_profit_percent=None) -> tuple:
         """
         Backtests a trading strategy based on buy and sell signals, with optional moving stop-loss and stop-profit logic.
 

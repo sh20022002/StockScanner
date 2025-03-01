@@ -3,3 +3,4 @@ fit avg to stock
 figure when stock is on avg
 1. indicaitors need relaxation of the Thresholds
 2. no 1h data
+EMA Crossover bollinger_bands are geting error

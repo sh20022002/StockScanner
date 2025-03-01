@@ -35,7 +35,7 @@ def run_trading_while_market_is_open(fivem=300):
 
     while True: #scraping.is_nyse_open():  
 
-        for symbol in ['AAPL']: #, 'AMZN', 'META', 'MSFT', 'NVDA', 'PYPL', 'BAC', 'CSCO', 'GOOG', 'COST', 'MS', 'UPST', 'TSM', 'ANF', 'IBM', 'PANW', 'HOOD']:
+        for symbol in ['SPY']: #, 'AMZN', 'META', 'MSFT', 'NVDA', 'PYPL', 'BAC', 'CSCO', 'GOOG', 'COST', 'MS', 'UPST', 'TSM', 'ANF', 'IBM', 'PANW', 'HOOD']:
 
             # symbol = symbol[0]
             # Index(['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry',
@@ -57,10 +57,13 @@ def run_trading_while_market_is_open(fivem=300):
 
             
             df = pl.from_pandas(df, include_index=True)
-            avg.find_avg(df)
-            # best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
+            # avg.find_avg(df)
+            best, backtest_res = stock.get_strategy_func(df, timeframe=timeframe)
             
             # print(symbol, timeframe)
+            for res in backtest_res:
+                if res == 'risk_metrics':
+                    print(res)
             # if strategy.what_is_signal(best, backtest_res, 4): # returns true for buy and false for sale else None
             #     print(f'buy {symbol}')
             
