@@ -536,7 +536,8 @@ class Strategy:
             ('atr_breakout', self.atr_breakout),
             ('parabolic_sar', self.parabolic_sar),
             ('stochastic_oscillator', self.stochastic_oscillator),
-            ('ema_crossover', self.ema_crossover)
+            ('ema_crossover', self.ema_crossover),
+            ('prev_high_low', self.prev_high_low)
         ]
 
         # Run all tasks concurrently using ThreadPoolExecutor
@@ -997,6 +998,59 @@ class Strategy:
         .fill_null(False).alias('sell_signals'))
 
         return generate_signal(df['sell_signals'].to_list(), df['buy_signals'].to_list(), df['Datetime'].to_list())
+    
+    def prev_high_low(self, df: pl.DataFrame, N: int = 390) -> pl.DataFrame:
+        """
+        Generate buy/sell signals when the current Close price breaks above or below
+        the previous N-bar High/Low (on a minute timeframe).
+        
+        By default, N=390 represents the approximate number of minutes in a standard 
+        U.S. trading day (9:30 AM – 4:00 PM ET). At each row, this function:
+        • Looks back at the last N rows (excluding the current row).
+        • Finds the minimum Low and maximum High of those N rows.
+        • Triggers a buy signal if the current Close >= that maximum High.
+        • Triggers a sell signal if the current Close <= that minimum Low.
+        
+        Args:
+            df (pl.DataFrame):
+                A Polars DataFrame containing at least the following columns:
+                'Datetime', 'High', 'Low', and 'Close'.
+            N (int, optional):
+                The number of previous rows to consider when determining
+                the rolling minimum and maximum. Defaults to 390.
+        
+        Returns:
+            pl.DataFrame:
+                A Polars DataFrame of signals, specifically created via 
+                the helper function generate_signal(). The resulting DataFrame 
+                has 'Buy_Signal' and 'Sell_Signal' columns aligned by 'Datetime'.
+        
+        Usage Example:
+            >>> # Suppose you have a Polars DataFrame df with minute bars
+            >>> # for a single trading day.  This function will mark each row
+            >>> # where Close crosses above or below the prior day’s range.
+            >>> signals_df = prev_high_low(df)
+            >>> # signals_df will contain boolean columns 'Buy_Signal' and 'Sell_Signal',
+            >>> # as well as 'Datetime'.
+
+        """
+        df = df.with_columns([
+            pl.col("Low").shift(1).rolling_min(window_size=N).alias("prev_n_min"),
+            pl.col("High").shift(1).rolling_max(window_size=N).alias("prev_n_max")
+        ])
+        
+        buy_signals = df["Close"] >= df["prev_n_max"]
+        sell_signals = df["Close"] <= df["prev_n_min"]
+
+        # Fill null values with False directly
+        buy_signals = buy_signals.fill_null(False)
+        sell_signals = sell_signals.fill_null(False)
+
+        return generate_signal(
+            sell_signals.to_list(), 
+            buy_signals.to_list(), 
+            df["Datetime"].to_list()
+        )
 
     def vwap(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -1055,6 +1109,8 @@ def generate_signal(sell_signals: list, buy_signals: list, indexs: list) -> pl.D
     })
 
     return signals_df
+
+   
 
 def what_is_signal(best, backtest_res, n):
     num_of_sell = 0
