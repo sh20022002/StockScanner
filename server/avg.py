@@ -3,7 +3,7 @@ import pandas as pd
 
 
 
-def find_avg(df:pl.DataFrame):
+def find_avg(df:pl.DataFrame) -> pl.DataFrame:
     '''
     finds the simple moving avrage the the stock price baunce on 20/50/100/150/200
     '''
@@ -15,7 +15,7 @@ def find_avg(df:pl.DataFrame):
         (((df['Close'] - df['SMA150'])/df['Close'])*100).alias('dis_from_150')])
     me = df['dis_from_150'].mean()
 
-    i
+    return me
 
 
     

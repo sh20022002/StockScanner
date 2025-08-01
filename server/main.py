@@ -7,7 +7,7 @@ import polars.selectors as cs
 # import model_rgb 
 
 
-def chack_data():
+def chack_data(data):
     fields = {}
     for key, value in data['INFO'].items():
         if key in fields:

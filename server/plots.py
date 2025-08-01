@@ -3,6 +3,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import pandas as pd
 import polars as pl
+import plotly as plt
 
 def plot_stock(df, stock, columns, signals=None, show='no', interval='1h'):
     """

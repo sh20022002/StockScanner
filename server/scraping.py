@@ -338,6 +338,3 @@ def easter_monday(year):
         easter_sunday = datetime(year, month, day)
         return easter_sunday + timedelta(days=1)
 
-
-if __name__ == '__main__':
-    print(get_stock_data('AAPL')['DF'])
