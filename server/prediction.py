@@ -1,106 +1,132 @@
-'''uses the model to predict stock vulnerability'''
-import os
-import scraping
-import training, database
-import numpy as np
-from hmmlearn import hmm
+"""Use trained models to predict next close price and market regime."""
 import pickle
-import pandas as pd
+
+import numpy as np
+
+import scraping
+import training
+import database
 
 
-def stock_and_tecnical(stock, interval='1h'):
-    '''
-    Retrieves stock data and adds technical indicators to the dataframe.
+# ---------------------------------------------------------------------------
+# HMM — market regime
+# ---------------------------------------------------------------------------
 
-    Parameters:
-    - stock (str): The stock symbol.
-    - interval (str): The time interval for the stock data. Default is '1h'.
+_STATES = ['negative', 'neutral', 'positive']
+
+
+def predict_regime(symbol: str, interval: str) -> tuple[str, float]:
+    """
+    Return the predicted next market regime and its probability.
 
     Returns:
-    - df (pandas.DataFrame): The dataframe containing stock data with added technical indicators.
-    '''
-    df = scraping.get_stock_data(stock, interval=interval, DAYS=365)
-    df = df['DF']
-    return df
+        (state, probability) e.g. ('positive', 0.82)
+    """
+    record = database.get_hmm_model(symbol, interval)
+    if record is None:
+        # No model yet — fetch data and train on the fly
+        data = scraping.get_stock_data(symbol, interval=interval, DAYS=365,
+                                       return_flags={'DF': True, 'INDICATORS': True})
+        df = data.get('DF')
+        if df is None or df.empty:
+            return 'neutral', 0.0
+        training.train_hmm(symbol, df, interval)
+        record = database.get_hmm_model(symbol, interval)
+        if record is None:
+            return 'neutral', 0.0
+
+    # Retrain if stale (>1 day old)
+    last_update = record.get('last_update')
+    if last_update is not None:
+        today = scraping.get_exchange_time()
+        if hasattr(today, 'replace'):
+            today = today.replace(tzinfo=None)
+        if hasattr(last_update, 'replace'):
+            last_update = last_update.replace(tzinfo=None)
+        if (today - last_update).days > 1:
+            training.train_hmm_to_date(symbol, last_update, interval)
+            record = database.get_hmm_model(symbol, interval)
+
+    model = pickle.loads(record['model'])
+
+    # Get the most recent return as input
+    data = scraping.get_stock_data(symbol, interval=interval, DAYS=30,
+                                   return_flags={'DF': True, 'INDICATORS': False})
+    df = data.get('DF')
+    if df is None or len(df) < 2:
+        return 'neutral', 0.0
+
+    current_return = float(np.log(df['Close'].iloc[-1] / df['Close'].iloc[-2]))
+    obs = np.array([[current_return]])
+
+    state_probs  = model.predict_proba(obs)[0]   # shape (n_states,)
+    next_state   = int(np.argmax(state_probs))
+    return _STATES[next_state], float(state_probs[next_state])
 
 
+# ---------------------------------------------------------------------------
+# RandomForest — next close price
+# ---------------------------------------------------------------------------
 
-def predict_next_state_and_probabilities( current_return, stock, interval):
-    '''
-    Predicts the next state and probabilities of a stock return using a trained model.
+def predict_next_close(symbol: str, interval: str = '1d') -> float | None:
+    """
+    Predict the next closing price for symbol using the trained RF model.
 
-    Parameters:
-    - path_to_model (str): The path to the trained model file.
-    - current_return (list): The current return value as a list.
+    Trains the model first if it doesn't exist.
+    Returns predicted price or None on failure.
+    """
+    record = database.get_model(interval)
+    if record is None:
+        try:
+            training.train_model(symbol, interval)
+            record = database.get_model(interval)
+        except Exception as e:
+            print(f'predict_next_close: training failed for {symbol}: {e}')
+            return None
+
+    model = pickle.loads(record['model'])
+
+    data = scraping.get_stock_data(symbol, interval=interval, DAYS=60,
+                                   return_flags={'DF': True, 'INDICATORS': True})
+    df = data.get('DF')
+    if df is None or df.empty:
+        return None
+
+    feature_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume',
+                                 'SMA150', 'EMA20', 'RSI', 'ATR', 'MACD']
+                    if c in df.columns]
+    last_row = df[feature_cols].iloc[[-1]]   # 2-D DataFrame, not Series
+
+    try:
+        prediction = model.predict(last_row)
+        return float(prediction[0])
+    except Exception as e:
+        print(f'predict_next_close: inference failed for {symbol}: {e}')
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Combined signal
+# ---------------------------------------------------------------------------
+
+def full_prediction(symbol: str, interval: str = '1d') -> dict:
+    """
+    Return both regime and price prediction for a symbol.
 
     Returns:
-    - None
-
-    '''
-    model = database.get_hmm_model(stock, interval)
-    last_updat = model['last_update']
-    today = scraping.get_exchange_time()
-    time = today - last_updat
-    if time.days > 1:
-        training.train_hmm_to_date()
-    model = pickle.load(model['model'])
-    current_return = np.array(current_return).reshape(-1, 1)
-        
-    state_probs = model.predict_proba(current_return)
-    next_state = np.argmax(state_probs)
-    next_state_probs = state_probs[0]
-    states = ['negative', 'neutral', 'positive']
-    # print(f"Predicted state for the next hour: {states[next_state]}")
-    state = states[next_state]
-    probability = next_state_probs[next_state]
-    # print(f"Probability of negative return: {next_state_probs[0]:.2f}")
-    # print(f"Probability of neutral return: {next_state_probs[1]:.2f}")
-    # print(f"Probability of positive return: {next_state_probs[2]:.2f}")
-    return(state, probability)
-
-
-def predict_next_close(stock, df):
+        {
+            'interval':    '1d',
+            'regime':      'positive',
+            'probability': 0.82,
+            'next_close':  185.40,
+        }
     """
-    Predicts the next closing price for a given stock using a trained model.
+    regime, prob = predict_regime(symbol, interval)
+    next_close   = predict_next_close(symbol, interval)
 
-    Args:
-        stock (str): The stock symbol or identifier.
-        df (pandas.DataFrame): The input data for prediction.
-
-    Returns:
-        float: The predicted closing price.
-
-    Raises:
-        FileNotFoundError: If the model file is not found.
-
-    """
-    X_train, X_test, y_train, y_test = training.pipline(stock)
-
-    training.train_p(X_train, X_test, y_train, y_test, stock)
-
-    current = None
-    last_row = df.iloc[-1]
-    last_row = last_row.drop('Datetime')
-    
-    df = pd.DataFrame(last_row).T
-    
-    prediction = model.predict(df) 
-    return prediction
-
-def probability_of_returns(self, interval):
-    """
-    Calculate the probability of future stock returns using the HMM model.
-    """
-    # needs a function to refit the hmm model
-    df = self.get_df(interval=interval)
-    df = add_all(df)
-    current_return = df['Close'][0] - df['Close'][1]
-    hmm = database.get_hmm_model(self.symbol, interval=interval)
-    if(hmm == None):
-        model = train_hmm(self.symbol, df)
-    else:
-        model = hmm
-    state, probability = predict_next_state_and_probabilities(current_return, self.symbol)
-
-    prediction = predict_next_close(self.symbol, self.get_df(interval=interval))    
-    return interval, state, prediction, probability
+    return {
+        'interval':    interval,
+        'regime':      regime,
+        'probability': round(prob, 4),
+        'next_close':  round(next_close, 2) if next_close is not None else None,
+    }
