@@ -10,6 +10,19 @@ exchange_api_key = os.getenv('EXCHANGE_API_KEY')
 
 _REQUIRED = ['Open', 'High', 'Low', 'Close', 'Volume']
 
+# Minimum bars needed before the 150/200-period indicators mean anything.
+MIN_BARS = 50
+
+
+def yahoo_symbol(symbol: str) -> str:
+    """
+    Translate an exchange ticker into Yahoo Finance's form.
+
+    Wikipedia lists class shares with a dot (BRK.B, BF.B); Yahoo uses a hyphen
+    (BRK-B, BF-B). Without this the affected symbols fail every single scan.
+    """
+    return symbol.strip().upper().replace('.', '-')
+
 
 # ---------------------------------------------------------------------------
 # Indicators — pure Polars, no pandas_ta (9× faster than the old approach)
@@ -44,7 +57,10 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     # ── RSI ────────────────────────────────────────────────────────────────
-    df = df.with_columns(pl.col('Close').diff().alias('_delta'))
+    # diff() is null on the first row, which propagated all the way to RSI and
+    # left a null the strategies then had to paper over. Seed it at zero and
+    # report a flat or empty window as neutral 50 rather than a misleading 0.
+    df = df.with_columns(pl.col('Close').diff().fill_null(0.0).alias('_delta'))
     df = df.with_columns([
         pl.col('_delta').clip(lower_bound=0.0).alias('_gain'),
         (-pl.col('_delta')).clip(lower_bound=0.0).alias('_loss'),
@@ -54,7 +70,10 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
         pl.col('_loss').rolling_mean(window_size=14, min_periods=1).alias('_al'),
     ])
     df = df.with_columns(
-        (100.0 - 100.0 / (1.0 + pl.col('_ag') / (pl.col('_al') + 1e-10))).alias('RSI')
+        pl.when((pl.col('_ag') + pl.col('_al')) <= 0)
+          .then(pl.lit(50.0))
+          .otherwise(100.0 - 100.0 / (1.0 + pl.col('_ag') / (pl.col('_al') + 1e-10)))
+          .alias('RSI')
     )
 
     # ── ATR ────────────────────────────────────────────────────────────────
@@ -104,25 +123,58 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
 # Batch download — ONE network call for up to chunk_size symbols
 # ---------------------------------------------------------------------------
 
+def _normalise_index(df_pd: pd.DataFrame) -> pd.DataFrame:
+    """Strip timezone, name the index 'Datetime', de-duplicate and sort."""
+    if getattr(df_pd.index, 'tz', None) is not None:
+        df_pd.index = df_pd.index.tz_localize(None)
+    df_pd.index.name = 'Datetime'
+    if df_pd.index.has_duplicates:
+        df_pd = df_pd[~df_pd.index.duplicated(keep='first')]
+    return df_pd.sort_index()
+
+
+def _clean_ohlcv(df_pd: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Reduce a raw yfinance frame to clean, complete OHLCV rows.
+
+    Yahoo emits a partial row for the session currently in progress: Volume is
+    populated but Open/High/Low/Close are NaN. `dropna(how='all')` leaves that
+    row in place, which used to crash parabolic_sar and turn every backtest ROI
+    into NaN — so drop on the required columns instead.
+    """
+    if df_pd is None or df_pd.empty:
+        return None
+    if not all(c in df_pd.columns for c in _REQUIRED):
+        return None
+    df_pd = df_pd[_REQUIRED].dropna()
+    return df_pd if not df_pd.empty else None
+
+
 def batch_download(
     symbols: list,
     period: str = '2y',
     interval: str = '1d',
     chunk_size: int = 200,
+    quiet: bool = False,
 ) -> dict:
     """
     Download OHLCV data for all symbols in batches using yf.download().
-    Returns {symbol: pl.DataFrame} with indicators already computed.
+    Returns {symbol: pl.DataFrame} with indicators already computed, keyed by
+    the symbol as it was passed in (not the Yahoo-normalised form).
 
-    Replaces 500 individual HTTP calls with ~3 batch calls — 50-100× faster.
+    Replaces 500 individual HTTP calls with ~3 batch calls.
     """
-    result = {}
+    result: dict = {}
+    n_chunks = -(-len(symbols) // chunk_size)
 
     for i in range(0, len(symbols), chunk_size):
         chunk = symbols[i : i + chunk_size]
+        # Yahoo ticker -> the symbol the caller asked for (BRK-B -> BRK.B).
+        wanted = {yahoo_symbol(s): s for s in chunk}
+
         try:
             raw = yf.download(
-                chunk,
+                list(wanted),
                 period=period,
                 interval=interval,
                 group_by='ticker',
@@ -134,31 +186,42 @@ def batch_download(
             print(f'[batch_download] chunk {i//chunk_size + 1} error: {e}')
             continue
 
-        for sym in chunk:
-            try:
-                df_pd = raw[sym].copy() if len(chunk) > 1 else raw.copy()
-                df_pd = df_pd.dropna(how='all')
-                if df_pd.empty or not all(c in df_pd.columns for c in _REQUIRED):
-                    continue
+        if raw is None or raw.empty:
+            continue
 
-                df_pd = df_pd[_REQUIRED]
-                df_pd.index = df_pd.index.tz_localize(None)
-                df_pd.index.name = 'Datetime'
-                if df_pd.index.has_duplicates:
-                    df_pd = df_pd[~df_pd.index.duplicated(keep='first')]
-                df_pd.sort_index(inplace=True)
+        # yfinance returns per-ticker MultiIndex columns for a list of symbols
+        # (including a 1-element list) and flat columns for a bare string.
+        # Keying off len(chunk) silently returned zero rows for 1-symbol lists.
+        is_multi = isinstance(raw.columns, pd.MultiIndex)
+        available = set(raw.columns.get_level_values(0)) if is_multi else None
+
+        for ysym, orig in wanted.items():
+            try:
+                if is_multi:
+                    if ysym not in available:
+                        continue
+                    df_pd = raw[ysym].copy()
+                else:
+                    df_pd = raw.copy()
+
+                df_pd = _clean_ohlcv(df_pd)
+                if df_pd is None:
+                    continue
+                df_pd = _normalise_index(df_pd)
 
                 df_pl = pl.from_pandas(df_pd, include_index=True)
-                if len(df_pl) < 50:
+                if len(df_pl) < MIN_BARS:
                     continue
 
-                result[sym] = compute_indicators(df_pl)
+                result[orig] = compute_indicators(df_pl)
 
-            except Exception:
+            except Exception as e:
+                print(f'[batch_download] {orig}: {e}')
                 continue
 
-        print(f'  downloaded chunk {i//chunk_size + 1}/{-(-len(symbols)//chunk_size)}'
-              f' ({len(result)} stocks ready so far)')
+        if not quiet:
+            print(f'  downloaded chunk {i//chunk_size + 1}/{n_chunks}'
+                  f' ({len(result)} stocks ready so far)')
 
     return result
 
@@ -190,7 +253,7 @@ def get_stock_data(
     result     = {}
 
     try:
-        ticker = yf.Ticker(stock)
+        ticker = yf.Ticker(yahoo_symbol(stock))
     except Exception as e:
         print(f'Error creating ticker for {stock}: {e}')
         return result
@@ -234,7 +297,6 @@ def get_stock_data(
             print(f'No data for {stock}.')
             return result
 
-        df.index.name = 'Datetime'
         df.drop(columns=[c for c in ['Dividends', 'Stock Splits'] if c in df.columns],
                 inplace=True)
 
@@ -243,11 +305,12 @@ def get_stock_data(
             print(f'Missing columns for {stock}: {missing}')
             return result
 
-        df = df[_REQUIRED]
-        df.index = df.index.tz_localize(None)
-        if df.index.has_duplicates:
-            df = df[~df.index.duplicated(keep='first')]
-        df.sort_index(inplace=True)
+        # Same partial-bar problem as batch_download — drop incomplete rows.
+        df = _clean_ohlcv(df)
+        if df is None:
+            print(f'No complete bars for {stock}.')
+            return result
+        df = _normalise_index(df)
 
         if return_flags.get('INDICATORS', True):
             df_pl = pl.from_pandas(df, include_index=True)
@@ -264,32 +327,46 @@ def get_stock_data(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def current_stock_price(symbol: str) -> float:
-    """Get the latest closing price for a symbol."""
+def current_stock_price(symbol: str) -> float | None:
+    """
+    Latest close for a symbol, or None if it cannot be determined.
+
+    Returns None rather than a placeholder — a fabricated $1.00 price used to
+    flow straight into the dashboard as if it were real.
+
+    Only for one-off single-symbol lookups. Do NOT call this inside a scan:
+    the batch download already carries the last close.
+    """
     try:
-        df = yf.Ticker(symbol).history(period='1mo')
-        if df.empty:
-            return 1.0
-        return float(df['Close'].iloc[-1])
+        df = yf.Ticker(yahoo_symbol(symbol)).history(period='5d')
+        if df.empty or 'Close' not in df.columns:
+            return None
+        close = df['Close'].dropna()
+        return float(close.iloc[-1]) if not close.empty else None
     except Exception as e:
         print(f'Error getting price for {symbol}: {e}')
-        return 1.0
+        return None
 
 
 def get_tickers():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     resp = requests.get(
         'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
-        headers=headers
+        headers=headers,
+        timeout=30,
     )
     resp.raise_for_status()
     return pd.read_html(resp.text)[0].values
 
 
 def get_stocks():
+    """
+    Return (names, symbols) for the S&P 500, with symbols already normalised
+    to Yahoo's form so downstream callers never have to think about it.
+    """
     tickers = get_tickers()
     names   = [t[1] for t in tickers]
-    symbols = [t[0] for t in tickers]
+    symbols = [yahoo_symbol(str(t[0])) for t in tickers]
     return names, symbols
 
 
@@ -299,10 +376,12 @@ def get_exchange_time() -> datetime:
 
 
 def get_exchange_rate(from_currency: str, to_currency: str):
+    if not exchange_api_key:
+        return None
     url = f'https://v6.exchangerate-api.com/v6/{exchange_api_key}/latest/{from_currency}'
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=30)
     if resp.status_code == 200:
-        return resp.json()['conversion_rates'][to_currency]
+        return resp.json()['conversion_rates'].get(to_currency)
     return None
 
 

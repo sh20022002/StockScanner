@@ -1,15 +1,24 @@
-version: '3.8'
-
 services:
   mongodb:
-    image: mongo:latest
-    container_name: mongodb
+    image: mongo:7
+    container_name: smartraid-mongo
     restart: unless-stopped
+    # Credentials come from .env (see .env.example). They used to be admin/admin,
+    # committed in this file.
+    env_file:
+      - .env
     environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: admin
-      MONGO_INITDB_DATABASE: stocks
+      MONGO_INITDB_ROOT_USERNAME: ${DB_USER:?set DB_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MONGO_INITDB_DATABASE: ${DB_NAME:-SmartTraid}
     ports:
-      - "27017:27017"
+      # Bound to loopback. "27017:27017" published an unauthenticated database on
+      # every interface, and models are deserialised out of it.
+      - "127.0.0.1:27017:27017"
     volumes:
       - ./data/db:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

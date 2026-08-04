@@ -1,10 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
+# virtualenvs
+env/
 venv/
-__pycache__
-server/DockerFile.server
-.vscode
+.venv/
+
+# secrets — never commit these
+.env
+*.env
+!.env.example
+
+# local data
+data/
 APPL1m.csv
 all_requirements.txt
-venv/Lib/site-packages/polars/polars.pyd
-env/ 
-venv/ 
+server/signals_log.json
+
+# editor
+.vscode/
+.idea/
+
+server/DockerFile.server

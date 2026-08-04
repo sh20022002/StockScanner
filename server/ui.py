@@ -2,27 +2,41 @@
 SmarTraid — Real-Time Signal Dashboard
 Run with: streamlit run server/ui.py
 """
-import os, sys, json, threading, time
+import html
+import json
+import os
+import re
+import sys
+import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
-import polars as pl
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import polars as pl
+import streamlit as st
 
 sys.path.insert(0, os.path.dirname(__file__))
-import scraping, strategy, plots
+import plots
+import scanner
+import scraping
+import strategy
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SIGNALS_FILE   = Path(__file__).parent / "signals_log.json"
-SCAN_INTERVAL  = 300   # seconds between full scans
-MAX_WORKERS    = 10
-SIGNAL_LOOKBACK = 4
-TIMEFRAME      = '1d'
+SIGNALS_FILE    = Path(__file__).parent / "signals_log.json"
+MAX_HISTORY     = 500
+SIGNAL_LOOKBACK = scanner.DEFAULT_LOOKBACK
+
+# Yahoo tickers: letters, digits, dots and hyphens only. Anything else is either
+# a typo or an injection attempt — this input is rendered as raw HTML below.
+_SYMBOL_RE = re.compile(r'^[A-Za-z0-9.\-]{1,10}$')
+
+# The scanner thread and Streamlit's rerun both touch the signal file.
+_log_lock = threading.Lock()
 
 st.set_page_config(
     page_title="SmarTraid Scanner",
@@ -31,81 +45,111 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+def esc(value) -> str:
+    """
+    Escape a value for interpolation into an unsafe_allow_html block.
+
+    Symbols reach the feed from a free-text sidebar box and are persisted to
+    signals_log.json, so an unescaped `<img onerror=...>` would be stored and
+    re-rendered on every page load.
+    """
+    return html.escape(str(value), quote=True)
+
+
+def valid_symbol(symbol: str) -> bool:
+    return bool(_SYMBOL_RE.match(symbol or ''))
+
+
 # ---------------------------------------------------------------------------
-# Signal persistence (JSON file shared with scanner thread)
+# Signal persistence (JSON file shared with the scanner thread)
 # ---------------------------------------------------------------------------
 
 def load_signals() -> list[dict]:
-    if SIGNALS_FILE.exists():
-        try:
-            return json.loads(SIGNALS_FILE.read_text(encoding='utf-8'))
-        except Exception:
-            return []
-    return []
+    if not SIGNALS_FILE.exists():
+        return []
+    try:
+        data = json.loads(SIGNALS_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _write_atomic(signals: list[dict]):
+    """
+    Replace the log in one atomic step.
+
+    `write_text` truncates before it writes, so an interrupted save — or a
+    concurrent read — used to observe a half-written, invalid JSON file.
+    """
+    payload = json.dumps(signals, default=str, indent=2)
+    fd, tmp = tempfile.mkstemp(dir=str(SIGNALS_FILE.parent), suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(payload)
+        os.replace(tmp, SIGNALS_FILE)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def save_signals(signals: list[dict]):
-    SIGNALS_FILE.write_text(json.dumps(signals, default=str, indent=2), encoding='utf-8')
+    with _log_lock:
+        _write_atomic(signals)
 
 
-def add_signal(entry: dict):
-    signals = load_signals()
-    signals.insert(0, entry)      # newest first
-    signals = signals[:500]       # cap history
-    save_signals(signals)
+def _dedupe_key(entry: dict) -> tuple:
+    """One signal per symbol, direction and bar — not one per scan."""
+    return (entry.get('symbol'), entry.get('direction'), str(entry.get('time'))[:10])
+
+
+def add_signals(entries: list[dict]):
+    """
+    Append new signals, skipping duplicates.
+
+    Read-modify-write under a lock: the previous version was called from ten
+    concurrent workers with no synchronisation, so writes were silently lost.
+    Repeated scans of the same daily bar also re-logged identical signals until
+    the history cap flushed everything else out.
+    """
+    if not entries:
+        return
+    with _log_lock:
+        current = load_signals()
+        seen = {_dedupe_key(e) for e in current}
+        fresh = [e for e in entries if _dedupe_key(e) not in seen]
+        if not fresh:
+            return
+        merged = (fresh + current)[:MAX_HISTORY]
+        _write_atomic(merged)
 
 
 # ---------------------------------------------------------------------------
-# Scanner (runs in a background thread)
+# Scanner (runs in a background thread; the heavy work is in scanner.scan)
 # ---------------------------------------------------------------------------
 
-def _analyse_symbol(symbol: str, df: pl.DataFrame) -> dict | None:
-    """Run all strategies on one pre-fetched Polars DataFrame."""
-    try:
-        stock = strategy.Strategy(symbol=symbol)
-        best, backtest_res = stock.get_strategy_func(df, timeframe=TIMEFRAME, plot=False)
-        sig = strategy.what_is_signal(best, backtest_res, SIGNAL_LOOKBACK)
-        if sig is None:
-            return None
-
-        rois  = [r['risk_metrics']['roi']      for r in backtest_res if r.get('risk_metrics')]
-        wins  = [r['risk_metrics']['win_rate'] for r in backtest_res if r.get('risk_metrics')]
-        price = float(df['Close'][-1])  # use last close from the batch — no extra HTTP call
-
-        return {
-            'time':      datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'symbol':    symbol,
-            'direction': 'BUY' if sig is True else 'SELL',
-            'price':     round(price, 2),
-            'avg_roi':   round(sum(rois) / len(rois), 2) if rois else 0,
-            'win_rate':  round(sum(wins) / len(wins), 2) if wins else 0,
-            'strategy':  best or 'combined',
-        }
-    except Exception:
-        return None
-
-
-def _scanner_thread(symbols: list[str], stop_event: threading.Event):
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+def _scanner_thread(symbols: list[str], timeframe: str, lookback: int,
+                    min_margin: int, stop_event: threading.Event):
+    interval = scanner.scan_interval_seconds(timeframe)
     while not stop_event.is_set():
-        # ── Single batch download for all symbols ──────────────────────
-        stock_data = scraping.batch_download(symbols, period='2y', interval=TIMEFRAME,
-                                             chunk_size=200)
+        try:
+            if scanner.should_scan_now(timeframe):
+                found = scanner.scan(symbols, timeframe=timeframe,
+                                     lookback=lookback, quiet=True,
+                                     min_margin=min_margin,
+                                     stop_event=stop_event)
+                add_signals(found)
+                wait = interval
+            else:
+                wait = scanner.CLOSED_MARKET_SLEEP
+        except Exception as e:
+            print(f'[scanner thread] {e}')
+            wait = interval
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = {ex.submit(_analyse_symbol, sym, df): sym
-                       for sym, df in stock_data.items()}
-            for future in as_completed(futures):
-                if stop_event.is_set():
-                    break
-                result = future.result()
-                if result:
-                    add_signal(result)
-
-        for _ in range(SCAN_INTERVAL):
-            if stop_event.is_set():
-                return
-            time.sleep(1)
+        # Wake promptly on stop instead of sleeping through it.
+        if stop_event.wait(timeout=wait):
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -118,20 +162,26 @@ def _init_state():
         'stop_event':      None,
         'thread':          None,
         'scan_symbols':    [],
+        'scan_timeframe':  scanner.DEFAULT_TIMEFRAME,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-def _start_scanner(symbols):
+def _start_scanner(symbols, timeframe, lookback, min_margin):
     stop = threading.Event()
-    t = threading.Thread(target=_scanner_thread, args=(symbols, stop), daemon=True)
+    t = threading.Thread(target=_scanner_thread,
+                         args=(symbols, timeframe, lookback, min_margin, stop),
+                         daemon=True)
     t.start()
-    st.session_state['scanner_running'] = True
-    st.session_state['stop_event']      = stop
-    st.session_state['thread']          = t
-    st.session_state['scan_symbols']    = symbols
+    st.session_state.update({
+        'scanner_running': True,
+        'stop_event':      stop,
+        'thread':          t,
+        'scan_symbols':    symbols,
+        'scan_timeframe':  timeframe,
+    })
 
 
 def _stop_scanner():
@@ -150,8 +200,8 @@ def _signal_color(direction: str) -> str:
 
 def _badge(direction: str) -> str:
     icon = '▲' if direction == 'BUY' else '▼'
-    color = _signal_color(direction)
-    return f'<span style="color:{color};font-weight:bold;font-size:1.1em">{icon} {direction}</span>'
+    return (f'<span style="color:{_signal_color(direction)};font-weight:bold;'
+            f'font-size:1.1em">{icon} {esc(direction)}</span>')
 
 
 def _metric_card(label, value, delta=None, suffix=''):
@@ -162,8 +212,8 @@ def _metric_card(label, value, delta=None, suffix=''):
         delta_html = f'<div style="color:{color};font-size:0.85em">{sign}{delta:.1f}%</div>'
     st.markdown(f"""
     <div style="background:#1e1e2e;padding:16px;border-radius:10px;text-align:center">
-        <div style="color:#888;font-size:0.8em;text-transform:uppercase">{label}</div>
-        <div style="color:#fff;font-size:1.6em;font-weight:bold">{value}{suffix}</div>
+        <div style="color:#888;font-size:0.8em;text-transform:uppercase">{esc(label)}</div>
+        <div style="color:#fff;font-size:1.6em;font-weight:bold">{esc(value)}{esc(suffix)}</div>
         {delta_html}
     </div>""", unsafe_allow_html=True)
 
@@ -174,20 +224,32 @@ def _metric_card(label, value, delta=None, suffix=''):
 
 def page_scanner():
     st.markdown("## 📡 Live Signal Scanner")
+    st.caption("ROI figures are measured **out-of-sample** — on the slice held back "
+               "from strategy selection. **Excess** is ROI minus buy-and-hold over "
+               "the same window; a strategy that cannot beat it is not worth trading.")
 
     # ── Sidebar controls ──────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### ⚙️ Scanner Controls")
 
         scope = st.radio("Symbol scope", ["Full S&P 500", "Custom list"], index=0)
+        symbols = None
         if scope == "Custom list":
             custom = st.text_area("Symbols (comma-separated)", value="AAPL,MSFT,NVDA,TSLA,AMZN")
-            symbols = [s.strip().upper() for s in custom.split(',') if s.strip()]
-        else:
-            symbols = None   # resolved below on start
+            raw = [s.strip() for s in custom.split(',') if s.strip()]
+            symbols = [scraping.yahoo_symbol(s) for s in raw if valid_symbol(s)]
+            rejected = [s for s in raw if not valid_symbol(s)]
+            if rejected:
+                st.warning("Ignored invalid symbol(s): " + ", ".join(esc(r) for r in rejected[:5]))
 
         timeframe_ui = st.selectbox("Timeframe", ['1d', '1h', '5d', '1wk'], index=0)
-        lookback_ui  = st.slider("Signal lookback (candles)", 1, 10, 4)
+        lookback_ui  = st.slider("Signal lookback (candles)", 1, 10, SIGNAL_LOOKBACK)
+        margin_ui    = st.slider("Consensus margin", 1, 6, scanner.DEFAULT_MIN_MARGIN,
+                                 help="Vote margin required when the selected strategy "
+                                      "is silent. At 1, about half the index signals on "
+                                      "any given day, mostly on 5-4 splits.")
+        st.caption(f"Re-scans every {scanner.scan_interval_seconds(timeframe_ui) // 60} min "
+                   f"on this timeframe.")
 
         st.markdown("---")
         col1, col2 = st.columns(2)
@@ -195,8 +257,8 @@ def page_scanner():
             start_btn = st.button("▶ Start", use_container_width=True,
                                   disabled=st.session_state.get('scanner_running', False))
         with col2:
-            stop_btn  = st.button("⏹ Stop",  use_container_width=True,
-                                  disabled=not st.session_state.get('scanner_running', False))
+            stop_btn = st.button("⏹ Stop", use_container_width=True,
+                                 disabled=not st.session_state.get('scanner_running', False))
 
         if start_btn:
             if symbols is None:
@@ -207,8 +269,10 @@ def page_scanner():
                         st.error(f"Failed to load symbols: {e}")
                         symbols = []
             if symbols:
-                _start_scanner(symbols)
+                _start_scanner(symbols, timeframe_ui, lookback_ui, margin_ui)
                 st.rerun()
+            else:
+                st.error("No valid symbols to scan.")
 
         if stop_btn:
             _stop_scanner()
@@ -226,21 +290,26 @@ def page_scanner():
     running = st.session_state.get('scanner_running', False)
     if running:
         n_syms = len(st.session_state.get('scan_symbols', []))
-        st.success(f"🟢 Scanner running — monitoring {n_syms} symbols  ·  refreshing every {SCAN_INTERVAL}s")
+        tf     = st.session_state.get('scan_timeframe', scanner.DEFAULT_TIMEFRAME)
+        every  = scanner.scan_interval_seconds(tf) // 60
+        st.success(f"🟢 Scanner running — {n_syms} symbols on {tf}, every {every} min")
+        if scanner.is_intraday(tf) and not scraping.is_nyse_open():
+            st.info("Exchange is closed — intraday scans are paused until it reopens.")
     else:
         st.info("⚪ Scanner stopped — press **▶ Start** to begin")
 
     # ── Metrics row ───────────────────────────────────────────────────────
     signals = load_signals()
-    buys  = [s for s in signals if s['direction'] == 'BUY']
-    sells = [s for s in signals if s['direction'] == 'SELL']
-    avg_roi = (sum(s['avg_roi'] for s in signals) / len(signals)) if signals else 0
+    buys  = [s for s in signals if s.get('direction') == 'BUY']
+    sells = [s for s in signals if s.get('direction') == 'SELL']
+    beat  = [s for s in signals if s.get('excess_roi', 0) > 0]
+    avg_excess = (sum(s.get('excess_roi', 0) for s in signals) / len(signals)) if signals else 0
 
     c1, c2, c3, c4 = st.columns(4)
-    with c1: _metric_card("Total Signals",  len(signals))
-    with c2: _metric_card("Buy Signals",    len(buys),  suffix='  ▲')
-    with c3: _metric_card("Sell Signals",   len(sells), suffix='  ▼')
-    with c4: _metric_card("Avg Strategy ROI", f"{avg_roi:+.1f}")
+    with c1: _metric_card("Total Signals", len(signals))
+    with c2: _metric_card("Buy / Sell", f"{len(buys)} / {len(sells)}")
+    with c3: _metric_card("Beat Buy & Hold", f"{len(beat)}/{len(signals)}" if signals else "—")
+    with c4: _metric_card("Avg Excess ROI", f"{avg_excess:+.1f}%")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -250,7 +319,6 @@ def page_scanner():
     with col_feed:
         st.markdown("### 🔔 Signal Feed")
 
-        # Filter controls
         fc1, fc2 = st.columns(2)
         with fc1:
             dir_filter = st.selectbox("Direction", ["All", "BUY", "SELL"])
@@ -259,9 +327,9 @@ def page_scanner():
 
         filtered = signals
         if dir_filter != "All":
-            filtered = [s for s in filtered if s['direction'] == dir_filter]
+            filtered = [s for s in filtered if s.get('direction') == dir_filter]
         if sym_filter:
-            filtered = [s for s in filtered if sym_filter.upper() in s['symbol']]
+            filtered = [s for s in filtered if sym_filter.upper() in s.get('symbol', '')]
 
         if not filtered:
             st.markdown(
@@ -271,33 +339,31 @@ def page_scanner():
             )
         else:
             for sig in filtered[:50]:
-                color   = _signal_color(sig['direction'])
-                roi_str = f"{sig['avg_roi']:+.1f}%"
-                wr_str  = f"{sig['win_rate']:.1f}%"
+                color  = _signal_color(sig.get('direction', ''))
+                excess = sig.get('excess_roi', 0)
+                ex_col = '#00c853' if excess > 0 else '#ff1744'
                 st.markdown(f"""
                 <div style="border-left:4px solid {color};background:#1e1e2e;
                             padding:10px 14px;margin:6px 0;border-radius:6px;
                             display:flex;justify-content:space-between;align-items:center">
                     <div>
-                        {_badge(sig['direction'])}
-                        <span style="color:#fff;font-size:1.15em;margin-left:8px;font-weight:bold">{sig['symbol']}</span>
-                        <span style="color:#aaa;font-size:0.85em;margin-left:8px">{sig['time']}</span>
+                        {_badge(sig.get('direction', ''))}
+                        <span style="color:#fff;font-size:1.15em;margin-left:8px;font-weight:bold">{esc(sig.get('symbol', ''))}</span>
+                        <span style="color:#aaa;font-size:0.85em;margin-left:8px">{esc(sig.get('time', ''))}</span>
                     </div>
                     <div style="text-align:right">
-                        <span style="color:#fff;font-size:1.0em">${sig['price']}</span>
-                        <span style="color:#aaa;font-size:0.8em;margin-left:8px">ROI {roi_str} · WR {wr_str}</span>
+                        <span style="color:#fff;font-size:1.0em">${esc(sig.get('price', 0))}</span>
+                        <span style="color:{ex_col};font-size:0.8em;margin-left:8px">excess {excess:+.1f}%</span>
+                        <span style="color:#aaa;font-size:0.8em;margin-left:8px">{esc(sig.get('strategy', ''))}</span>
                     </div>
                 </div>""", unsafe_allow_html=True)
 
     with col_chart:
         st.markdown("### 📊 Signal Distribution")
         if signals:
-            by_dir = {'BUY': len(buys), 'SELL': len(sells)}
             fig_pie = go.Figure(go.Pie(
-                labels=list(by_dir.keys()),
-                values=list(by_dir.values()),
-                marker_colors=['#00c853', '#ff1744'],
-                hole=0.4,
+                labels=['BUY', 'SELL'], values=[len(buys), len(sells)],
+                marker_colors=['#00c853', '#ff1744'], hole=0.4,
                 textinfo='label+percent+value',
             ))
             fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
@@ -305,16 +371,14 @@ def page_scanner():
                                   margin=dict(t=10, b=10))
             st.plotly_chart(fig_pie, use_container_width=True)
 
-            # ROI histogram
-            rois = [s['avg_roi'] for s in signals]
             fig_hist = go.Figure(go.Histogram(
-                x=rois, nbinsx=20,
-                marker_color='#5c6bc0',
-                opacity=0.8,
+                x=[s.get('excess_roi', 0) for s in signals], nbinsx=20,
+                marker_color='#5c6bc0', opacity=0.8,
             ))
+            fig_hist.add_vline(x=0, line_dash='dash', line_color='#ff1744')
             fig_hist.update_layout(
-                title="Strategy ROI distribution",
-                xaxis_title="ROI (%)", yaxis_title="Count",
+                title="Excess ROI vs buy-and-hold (out-of-sample)",
+                xaxis_title="Excess ROI (%)", yaxis_title="Count",
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                 font_color='#ccc', height=250, margin=dict(t=40, b=10)
             )
@@ -326,26 +390,29 @@ def page_scanner():
     # ── Full table ────────────────────────────────────────────────────────
     if signals:
         st.markdown("### 📋 Signal History")
-        table_df = pd.DataFrame(signals)
-        table_df = table_df.rename(columns={
-            'time': 'Time', 'symbol': 'Symbol', 'direction': 'Direction',
-            'price': 'Price ($)', 'avg_roi': 'Avg ROI (%)', 'win_rate': 'Win Rate (%)',
-            'strategy': 'Best Strategy',
+        table_df = pd.DataFrame(signals).rename(columns={
+            'time': 'Bar', 'symbol': 'Symbol', 'direction': 'Direction',
+            'price': 'Price ($)', 'roi': 'ROI (%)', 'benchmark_roi': 'Buy & Hold (%)',
+            'excess_roi': 'Excess (%)', 'win_rate': 'Win Rate (%)',
+            'trades': 'Trades', 'strategy': 'Best Strategy',
         })
-        st.dataframe(
-            table_df.head(200),
-            use_container_width=True,
-            column_config={
-                'Direction':  st.column_config.TextColumn(),
-                'Price ($)':  st.column_config.NumberColumn(format="$%.2f"),
-                'Avg ROI (%)': st.column_config.NumberColumn(format="%.2f%%"),
-                'Win Rate (%)': st.column_config.NumberColumn(format="%.1f%%"),
-            },
-            hide_index=True,
-        )
+        preferred = ['Bar', 'Symbol', 'Direction', 'Price ($)', 'ROI (%)',
+                     'Buy & Hold (%)', 'Excess (%)', 'Win Rate (%)', 'Trades',
+                     'Best Strategy']
+        table_df = table_df[[c for c in preferred if c in table_df.columns]]
 
-        csv = table_df.to_csv(index=False)
-        st.download_button("⬇ Export CSV", csv, "signals.csv", "text/csv")
+        st.dataframe(
+            table_df.head(200), use_container_width=True, hide_index=True,
+            column_config={
+                'Price ($)':      st.column_config.NumberColumn(format="$%.2f"),
+                'ROI (%)':        st.column_config.NumberColumn(format="%.2f%%"),
+                'Buy & Hold (%)': st.column_config.NumberColumn(format="%.2f%%"),
+                'Excess (%)':     st.column_config.NumberColumn(format="%.2f%%"),
+                'Win Rate (%)':   st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+        st.download_button("⬇ Export CSV", table_df.to_csv(index=False),
+                           "signals.csv", "text/csv")
 
     # ── Auto-refresh ──────────────────────────────────────────────────────
     if auto_refresh and running:
@@ -361,19 +428,18 @@ def page_analysis():
         try:
             names, symbols_list = scraping.get_stocks()
         except Exception:
-            names, symbols_list = ['SPY'], ['SPY']
+            names, symbols_list = ['SPDR S&P 500 ETF'], ['SPY']
 
         stock_name   = st.selectbox("Stock", names)
-        sindex       = names.index(stock_name)
-        stock_ticker = symbols_list[sindex]
+        stock_ticker = symbols_list[names.index(stock_name)]
         st.markdown(f"**Ticker:** `{stock_ticker}`")
 
-        intervals = ['1d', '1h', '5d', '1wk', '1mo']
-        interval  = st.selectbox("Interval", intervals, index=0)
-        period    = st.selectbox("Period",   ['1y', '2y', '6mo', '3mo', 'max'], index=0)
+        interval = st.selectbox("Interval", ['1d', '1h', '5d', '1wk', '1mo'], index=0)
+        period   = st.selectbox("Period", ['2y', '1y', '6mo', '3mo', 'max'], index=0)
 
-        indicators = st.multiselect("Overlay indicators",
-            ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA20'],
+        indicators = st.multiselect(
+            "Overlay indicators",
+            ['SMA20', 'SMA50', 'SMA100', 'SMA150', 'SMA200', 'EMA12', 'EMA20', 'EMA26', 'VWAP'],
             default=['SMA20', 'SMA50'])
 
         run_btn = st.button("🔎 Analyse", use_container_width=True)
@@ -387,93 +453,99 @@ def page_analysis():
             data = scraping.get_stock_data(
                 stock_ticker, interval=interval, period=period,
                 return_flags={'DF': True, 'INDICATORS': True,
-                              'MAX_KEY': True, 'SUMMERY': True, 'DIVD': True, 'INFO': True}
+                              'MAX_KEY': True, 'SUMMARY': True, 'DIVD': True, 'INFO': True}
             )
         except Exception as e:
             st.error(f"Data fetch failed: {e}")
             return
 
-    if not data or 'DF' not in data or data['DF'] is None or data['DF'].empty:
+    if not data or data.get('DF') is None or data['DF'].empty:
         st.error(f"No data returned for {stock_ticker}")
         return
 
-    df_pd  = data['DF']
-    df_pl  = pl.from_pandas(df_pd, include_index=True)
-    info   = data.get('INFO', {})
+    df_pl   = pl.from_pandas(data['DF'], include_index=True)
+    info    = data.get('INFO', {})
+    # These keys are 'SUMMARY' and 'DIVD' in scraping.get_stock_data; reading
+    # 'SUMMERY'/'DIVID' as before always yielded an empty string.
     summary = data.get('SUMMARY', '')
     max_key = data.get('MAX_KEY', '')
-    divid   = data.get('DIVID', '')
+    divid   = data.get('DIVD', '')
 
-    # ── Key metrics ────────────────────────────────────────────────────────
-    price = scraping.current_stock_price(stock_ticker)
+    # ── Key metrics ───────────────────────────────────────────────────────
+    price = float(df_pl['Close'][-1])
     c1, c2, c3, c4 = st.columns(4)
-    with c1: _metric_card("Current Price", f"${price:.2f}")
+    with c1: _metric_card("Last Close", f"${price:.2f}")
     with c2: _metric_card("Recommendation", max_key or "—")
     with c3: _metric_card("Dividend", divid or "—")
-    with c4: _metric_card("Market Cap", f"{info.get('marketCap', 0)/1e9:.1f}B" if info.get('marketCap') else "—")
+    with c4: _metric_card("Market Cap",
+                          f"{info.get('marketCap', 0) / 1e9:.1f}B" if info.get('marketCap') else "—")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Candlestick chart with signals ────────────────────────────────────
+    # ── Strategy analysis ─────────────────────────────────────────────────
     with st.spinner("Running strategy analysis..."):
         try:
             stock_obj = strategy.Strategy(symbol=stock_ticker)
-            best, backtest_res = stock_obj.get_strategy_func(df_pl, timeframe=interval, plot=False)
-            sig = strategy.what_is_signal(best, backtest_res, SIGNAL_LOOKBACK)
+            best, backtest_res = stock_obj.evaluate_strategies(df_pl, timeframe=interval)
+            sig = strategy.what_is_signal(best, backtest_res, SIGNAL_LOOKBACK,
+                                          min_margin=scanner.DEFAULT_MIN_MARGIN)
         except Exception as e:
             st.warning(f"Strategy analysis failed: {e}")
             backtest_res, best, sig = [], None, None
 
-    # Find best strategy signals for chart
     best_signals = None
     if backtest_res:
-        for res in backtest_res:
-            if res['strategy_func'] == best:
-                best_signals = res['signals']
-                break
-        if best_signals is None:
-            best_signals = backtest_res[0]['signals']
+        best_signals = next((r['signals'] for r in backtest_res
+                             if r['strategy_func'] == best), backtest_res[0]['signals'])
 
-    fig = plots.plot_stock(df_pl, stock_ticker, df_pl.columns,
+    # Pass the chosen overlays, not every column in the frame.
+    fig = plots.plot_stock(df_pl, stock_ticker, indicators,
                            signals=best_signals, show='all', interval=interval)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Signal banner ─────────────────────────────────────────────────────
     if sig is True:
-        st.success(f"▲ **BUY signal** detected for {stock_ticker}  ·  Best strategy: `{best}`")
+        st.success(f"▲ **BUY signal** for {stock_ticker}  ·  Best strategy: `{best}`")
     elif sig is False:
-        st.error(f"▼ **SELL signal** detected for {stock_ticker}  ·  Best strategy: `{best}`")
+        st.error(f"▼ **SELL signal** for {stock_ticker}  ·  Best strategy: `{best}`")
     else:
         st.info(f"No signal at this time for {stock_ticker}  ·  Best strategy: `{best}`")
 
     # ── Strategy results table ────────────────────────────────────────────
     if backtest_res:
         st.markdown("### Strategy Backtest Results")
+        st.caption("**Train ROI** selected the strategy; **ROI** is the held-out "
+                   "out-of-sample result. A large gap between them is curve-fitting.")
         rows = []
         for r in backtest_res:
             rm = r.get('risk_metrics', {})
-            last_buy  = r['signals']['Buy_Signal'][-SIGNAL_LOOKBACK:].to_list() if r.get('signals') is not None else []
-            last_sell = r['signals']['Sell_Signal'][-SIGNAL_LOOKBACK:].to_list() if r.get('signals') is not None else []
+            tm = r.get('train_metrics', {})
+            last_buy  = r['signals']['Buy_Signal'][-SIGNAL_LOOKBACK:].to_list()
+            last_sell = r['signals']['Sell_Signal'][-SIGNAL_LOOKBACK:].to_list()
             rows.append({
-                'Strategy':    r['strategy_func'],
-                'ROI (%)':     rm.get('roi', 0),
-                'Win Rate (%)': rm.get('win_rate', 0),
-                'Max DD (%)':  rm.get('max_drawdown', 0),
-                'Days':        rm.get('time_frame_days', 0),
-                'Signal':      '▲ BUY' if any(last_buy) else ('▼ SELL' if any(last_sell) else '—'),
+                'Strategy':       r['strategy_func'],
+                'Train ROI (%)':  tm.get('roi', 0),
+                'ROI (%)':        rm.get('roi', 0),
+                'Buy & Hold (%)': rm.get('benchmark_roi', 0),
+                'Excess (%)':     rm.get('excess_roi', 0),
+                'Win Rate (%)':   rm.get('win_rate', 0),
+                'Trades':         rm.get('trades', 0),
+                'Max DD (%)':     rm.get('max_drawdown', 0),
+                'Signal':         '▲ BUY' if any(last_buy) else ('▼ SELL' if any(last_sell) else '—'),
+                'Selected':       '★' if r['strategy_func'] == best else '',
             })
         st.dataframe(
-            pd.DataFrame(rows).sort_values('ROI (%)', ascending=False),
-            use_container_width=True,
+            pd.DataFrame(rows).sort_values('Excess (%)', ascending=False),
+            use_container_width=True, hide_index=True,
             column_config={
-                'ROI (%)':     st.column_config.NumberColumn(format="%.2f%%"),
-                'Win Rate (%)': st.column_config.NumberColumn(format="%.1f%%"),
-                'Max DD (%)':  st.column_config.NumberColumn(format="%.2f%%"),
+                'Train ROI (%)':  st.column_config.NumberColumn(format="%.2f%%"),
+                'ROI (%)':        st.column_config.NumberColumn(format="%.2f%%"),
+                'Buy & Hold (%)': st.column_config.NumberColumn(format="%.2f%%"),
+                'Excess (%)':     st.column_config.NumberColumn(format="%.2f%%"),
+                'Win Rate (%)':   st.column_config.NumberColumn(format="%.1f%%"),
+                'Max DD (%)':     st.column_config.NumberColumn(format="%.2f%%"),
             },
-            hide_index=True,
         )
 
-    # ── Summary ───────────────────────────────────────────────────────────
     if summary:
         with st.expander("Business Summary"):
             st.write(summary)
@@ -491,7 +563,6 @@ with tab1:
 with tab2:
     page_analysis()
 
-# Dark theme tweak
 st.markdown("""<style>
     .stApp { background-color: #0e0e1a; }
     .block-container { padding-top: 1rem; }
