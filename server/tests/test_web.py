@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from web.app import call_performance
+from web.app import call_performance, sector_summary
 
 
 class TestCallPerformance:
@@ -55,3 +55,71 @@ class TestCallPerformance:
         # current_stock_price() returns None on failure, never 0 — but a
         # falsy 0.0 must not slip through and divide/produce a bogus 0% move.
         assert call_performance(100.0, 0.0, 'BUY') == (None, None)
+
+
+class TestSectorSummary:
+    SECTOR_MAP = {'AAPL': 'Technology', 'MSFT': 'Technology', 'JPM': 'Financial Services'}
+
+    def _sig(self, symbol, direction, time='2026-08-05 00:00:00', excess_roi=0.0):
+        return {'symbol': symbol, 'direction': direction, 'time': time, 'excess_roi': excess_roi}
+
+    def test_groups_by_sector_and_counts_directions(self):
+        signals = [
+            self._sig('AAPL', 'BUY'), self._sig('MSFT', 'SELL'), self._sig('JPM', 'BUY'),
+        ]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        by_sector = {r['sector']: r for r in rows}
+        assert by_sector['Technology']['total'] == 2
+        assert by_sector['Technology']['buys'] == 1
+        assert by_sector['Technology']['sells'] == 1
+        assert by_sector['Financial Services']['total'] == 1
+        assert by_sector['Financial Services']['buys'] == 1
+
+    def test_excludes_signals_from_other_days(self):
+        signals = [
+            self._sig('AAPL', 'BUY', time='2026-08-05 00:00:00'),
+            self._sig('MSFT', 'BUY', time='2026-08-04 00:00:00'),
+        ]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        assert sum(r['total'] for r in rows) == 1
+
+    def test_symbol_missing_from_sector_map_becomes_unknown_not_dropped(self):
+        signals = [self._sig('ZZZZ', 'BUY')]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        assert len(rows) == 1
+        assert rows[0]['sector'] == 'Unknown'
+        assert rows[0]['total'] == 1
+
+    def test_avg_excess_is_the_mean_within_the_sector(self):
+        signals = [
+            self._sig('AAPL', 'BUY', excess_roi=4.0),
+            self._sig('MSFT', 'BUY', excess_roi=-2.0),
+        ]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        assert rows[0]['sector'] == 'Technology'
+        assert rows[0]['avg_excess'] == 1.0
+
+    def test_beat_bench_counts_positive_excess_only(self):
+        signals = [
+            self._sig('AAPL', 'BUY', excess_roi=4.0),
+            self._sig('MSFT', 'BUY', excess_roi=-2.0),
+            self._sig('JPM', 'BUY', excess_roi=0.0),
+        ]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        by_sector = {r['sector']: r for r in rows}
+        assert by_sector['Technology']['beat_bench'] == 1
+
+    def test_missing_excess_roi_treated_as_zero(self):
+        signals = [{'symbol': 'AAPL', 'direction': 'BUY', 'time': '2026-08-05 00:00:00'}]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        assert rows[0]['avg_excess'] == 0.0
+
+    def test_sorted_by_total_descending(self):
+        signals = [
+            self._sig('AAPL', 'BUY'), self._sig('MSFT', 'BUY'), self._sig('JPM', 'BUY'),
+        ]
+        rows = sector_summary(signals, self.SECTOR_MAP, '2026-08-05')
+        assert rows[0]['sector'] == 'Technology'    # 2 signals, ahead of Financial Services' 1
+
+    def test_no_signals_today_returns_empty(self):
+        assert sector_summary([], self.SECTOR_MAP, '2026-08-05') == []

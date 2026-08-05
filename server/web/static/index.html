@@ -28,27 +28,61 @@
 
 <main class="layout">
 
+  <!-- ── Daily statistics by sector ───────────────────────────────── -->
+  <section class="panel sector-stats-panel">
+    <div class="panel-head">
+      <h2 class="panel-title">Today's Signals by Sector</h2>
+      <span class="hint" id="sector-stats-date"></span>
+    </div>
+    <div class="sector-stats-grid" id="sector-stats-grid">
+      <div class="feed-empty">No signals yet today.</div>
+    </div>
+  </section>
+
   <!-- ── Control rail ─────────────────────────────────────────────── -->
   <section class="panel control-rail">
     <h2 class="panel-title">Scanner Controls</h2>
 
     <label class="field">
       <span>Universe</span>
-      <select id="scope-select">
-        <option value="us_market">All US stocks (market cap filter)</option>
-        <option value="custom">Custom list</option>
+      <select id="exchange-select">
+        <option value="all" selected>All US exchanges</option>
+        <option value="nasdaq">NASDAQ</option>
+        <option value="nyse">NYSE</option>
+        <option value="amex">NYSE American</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>Sector</span>
+      <select id="sector-select">
+        <option value="" selected>All sectors</option>
+        <option value="Technology">Technology</option>
+        <option value="Healthcare">Healthcare</option>
+        <option value="Financial Services">Financial Services</option>
+        <option value="Consumer Cyclical">Consumer Cyclical</option>
+        <option value="Industrials">Industrials</option>
+        <option value="Communication Services">Communication Services</option>
+        <option value="Consumer Defensive">Consumer Defensive</option>
+        <option value="Energy">Energy</option>
+        <option value="Utilities">Utilities</option>
+        <option value="Real Estate">Real Estate</option>
+        <option value="Basic Materials">Basic Materials</option>
       </select>
     </label>
 
     <label class="field" id="market-cap-field">
       <span>Min market cap <em id="market-cap-val">$2.0B</em></span>
-      <input id="market-cap-range" type="range" min="0.1" max="50" step="0.1" value="2">
+      <input id="market-cap-range" type="range" min="0" max="3000" step="0.1" value="2">
+      <div class="cap-presets" id="cap-presets">
+        <button type="button" class="cap-chip" data-cap="0">Nano</button>
+        <button type="button" class="cap-chip" data-cap="0.05">Micro</button>
+        <button type="button" class="cap-chip" data-cap="0.3">Small</button>
+        <button type="button" class="cap-chip" data-cap="2">Mid</button>
+        <button type="button" class="cap-chip" data-cap="10">Large</button>
+        <button type="button" class="cap-chip" data-cap="200">Mega</button>
+      </div>
       <span class="field-note" id="market-cap-note">checking universe size…</span>
-    </label>
-
-    <label class="field" id="custom-symbols-field" hidden>
-      <span>Symbols (comma-separated)</span>
-      <input id="custom-symbols" type="text" value="AAPL,MSFT,NVDA,TSLA,AMZN" spellcheck="false">
     </label>
 
     <label class="field">
@@ -71,9 +105,12 @@
       <input id="margin-range" type="range" min="1" max="6" value="2">
     </label>
 
-    <div class="control-buttons">
-      <button id="start-btn" class="btn btn-start">▶ Start</button>
-      <button id="stop-btn" class="btn btn-stop" disabled>⏹ Stop</button>
+    <div class="switch-row">
+      <span class="switch-row-label">Scanner</span>
+      <button type="button" id="scan-toggle" class="switch" role="switch" aria-checked="false" aria-label="Start or stop the scanner">
+        <span class="switch-thumb"></span>
+      </button>
+      <span class="switch-row-state" id="scan-toggle-state">Stopped</span>
     </div>
     <button id="clear-btn" class="btn btn-ghost">🗑 Clear history</button>
 
@@ -97,6 +134,10 @@
       <div class="feed-filters">
         <select id="feed-direction">
           <option>All</option><option>BUY</option><option>SELL</option>
+        </select>
+        <select id="feed-sort">
+          <option value="time">Sort: Newest</option>
+          <option value="confidence">Sort: Confidence</option>
         </select>
         <input id="feed-symbol" type="text" placeholder="filter symbol…" spellcheck="false">
       </div>
@@ -129,6 +170,7 @@
     </div>
 
     <div class="verdict-banner" id="verdict-banner" hidden></div>
+    <div class="entry-price-banner" id="entry-price-banner" hidden></div>
 
     <div id="chart-container" class="chart-container">
       <div class="chart-placeholder" id="chart-placeholder">Pick a symbol and click Analyse.</div>
@@ -205,7 +247,7 @@
         <thead>
           <tr>
             <th>Bar</th><th>Symbol</th><th>Dir</th><th>Price</th>
-            <th>ROI</th><th>B&amp;H</th><th>Excess</th><th>Win%</th><th>Trades</th><th>Strategy</th>
+            <th>ROI</th><th>B&amp;H</th><th>Excess</th><th>Win%</th><th>Trades</th><th>Strategy</th><th>Confidence</th>
           </tr>
         </thead>
         <tbody id="history-tbody"></tbody>

@@ -20,11 +20,13 @@ const Api = (() => {
     stopScanner:   () => req('/api/scanner/stop', { method: 'POST' }),
     signals:       (params = {}) => req('/api/signals?' + new URLSearchParams(params)),
     signalsSummary:() => req('/api/signals/summary'),
+    sectorSummary: () => req('/api/signals/sector-summary'),
     clearSignals:  () => req('/api/signals', { method: 'DELETE' }),
     universe:      (params = {}) => req('/api/universe?' + new URLSearchParams(params)),
-    universeCount: (minMarketCap) => req('/api/universe/count?' + new URLSearchParams({ min_market_cap: minMarketCap })),
+    universeCount: (params = {}) => req('/api/universe/count?' + new URLSearchParams(params)),
     symbol:        (sym, params = {}) => req(`/api/symbol/${encodeURIComponent(sym)}?` + new URLSearchParams(params)),
     symbolSignalHistory: (sym) => req(`/api/symbol/${encodeURIComponent(sym)}/signal-history`),
     symbolNews:    (sym, count = 10) => req(`/api/symbol/${encodeURIComponent(sym)}/news?` + new URLSearchParams({ count })),
+    symbolEntryPrice: (sym, direction) => req(`/api/symbol/${encodeURIComponent(sym)}/entry-price?` + new URLSearchParams({ direction })),
   };
 })();

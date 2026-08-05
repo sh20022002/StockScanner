@@ -38,7 +38,25 @@ class ModelConfig:
 
 @dataclass
 class PPOConfig:
-    """PPO hyperparameters."""
+    """
+    PPO hyperparameters.
+
+    entropy_coef / entropy_coef_final, lr / lr_final_frac, and
+    cost_warmup_frac all define linear schedules over total_updates rather
+    than fixed values — see train.py. Fixed values let this collapse onto a
+    degenerate "always flat" policy: a flat position costs nothing and
+    returns exactly zero every step, so under a not-yet-informative policy
+    it looks like the safest action available, and once entropy has decayed
+    the policy stops exploring its way out. Observed empirically here —
+    entropy fell from ~0.98 to ~0.29 within 25 updates and validation
+    excess-ROI got monotonically worse across evals as more symbols settled
+    into zero trades. The schedules below target that failure mode directly:
+    entropy starts higher and decays slower, and — the bigger lever —
+    training starts commission/slippage-free so the policy can learn
+    genuine directional edge before cost makes "do nothing" the locally
+    rational move, then ramps cost up to the real rate it will face at
+    inference.
+    """
     total_updates: int = 60
     rollout_steps: int = 512          # env steps collected per update, across symbols
     epochs_per_update: int = 4
@@ -47,9 +65,12 @@ class PPOConfig:
     gae_lambda: float = 0.95
     clip_ratio: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.01
-    max_grad_norm: float = 0.5
+    entropy_coef: float = 0.02         # starting entropy bonus
+    entropy_coef_final: float = 0.003  # annealed linearly to this by the last update
     lr: float = 3e-4
+    lr_final_frac: float = 0.1         # lr anneals linearly to lr * this by the last update
+    cost_warmup_frac: float = 0.3      # fraction of total_updates ramping cost 0 -> full
+    max_grad_norm: float = 0.5
     eval_every: int = 10               # updates between validation evals
     seed: int = 42
 

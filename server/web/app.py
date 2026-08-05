@@ -93,7 +93,8 @@ class ScannerState:
         self.timeframe      = scanner.DEFAULT_TIMEFRAME
         self.lookback        = scanner.DEFAULT_LOOKBACK
         self.min_margin      = scanner.DEFAULT_MIN_MARGIN
-        self.scope           = 'us_market'
+        self.exchange        = 'all'          # key into scraping.EXCHANGE_GROUPS
+        self.sector: str | None = None        # None = every sector
         self.min_market_cap  = scraping.DEFAULT_MIN_MARKET_CAP
         self.last_scan_at: str | None = None
         self.last_scan_count = 0
@@ -108,7 +109,8 @@ class ScannerState:
             'timeframe':        self.timeframe,
             'lookback':         self.lookback,
             'min_margin':       self.min_margin,
-            'scope':            self.scope,
+            'exchange':         self.exchange,
+            'sector':           self.sector,
             'min_market_cap':   self.min_market_cap,
             'rl_available':     rl_live is not None and rl_live.model_available(),
             'scan_interval_s':  scanner.scan_interval_seconds(self.timeframe),
@@ -188,6 +190,20 @@ def index():
 # Scanner control
 # ---------------------------------------------------------------------------
 
+def _resolve_exchanges(exchange: str) -> tuple:
+    if exchange not in scraping.EXCHANGE_GROUPS:
+        raise HTTPException(400, f'Unknown exchange "{exchange}".')
+    return scraping.EXCHANGE_GROUPS[exchange]
+
+
+def _resolve_sector(sector: str | None) -> str | None:
+    """'' (an empty query param/form field) and None both mean 'every sector'."""
+    sector = sector or None
+    if sector is not None and sector not in scraping.GICS_SECTORS:
+        raise HTTPException(400, f'Unknown sector "{sector}".')
+    return sector
+
+
 @app.get('/api/status')
 def get_status():
     return json_ok(state.status())
@@ -198,36 +214,32 @@ async def start_scanner(body: dict):
     if state.running:
         raise HTTPException(409, 'Scanner already running')
 
-    scope = body.get('scope', 'us_market')
-    min_market_cap = scraping.DEFAULT_MIN_MARKET_CAP
-    if scope == 'custom':
-        raw = [s.strip() for s in body.get('symbols', []) if s and s.strip()]
-        invalid = [s for s in raw if not signal_log.valid_symbol(s)]
-        if invalid:
-            raise HTTPException(400, f'Invalid symbol(s): {", ".join(invalid[:5])}')
-        symbols = [scraping.yahoo_symbol(s) for s in raw]
-        if not symbols:
-            raise HTTPException(400, 'No symbols provided')
-    else:
-        try:
-            min_market_cap = float(body.get('min_market_cap', min_market_cap))
-        except (TypeError, ValueError):
-            raise HTTPException(400, 'min_market_cap must be a number')
-        if min_market_cap < 0:
-            raise HTTPException(400, 'min_market_cap must not be negative')
-        try:
-            equities = await asyncio.to_thread(scraping.get_us_equities, min_market_cap)
-        except Exception as e:
-            raise HTTPException(502, f'Failed to load the US equities universe: {e}')
-        symbols = [e['symbol'] for e in equities]
-        if not symbols:
-            raise HTTPException(400, 'No symbols matched that market cap filter.')
+    exchange = body.get('exchange', 'all')
+    exchanges = _resolve_exchanges(exchange)
+    sector = _resolve_sector(body.get('sector'))
+
+    try:
+        min_market_cap = float(body.get('min_market_cap', scraping.DEFAULT_MIN_MARKET_CAP))
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'min_market_cap must be a number')
+    if min_market_cap < 0:
+        raise HTTPException(400, 'min_market_cap must not be negative')
+
+    try:
+        equities = await asyncio.to_thread(
+            scraping.get_us_equities, min_market_cap, exchanges, sector)
+    except Exception as e:
+        raise HTTPException(502, f'Failed to load the US equities universe: {e}')
+    symbols = [e['symbol'] for e in equities]
+    if not symbols:
+        raise HTTPException(400, 'No symbols matched that exchange/sector/market cap filter.')
 
     state.symbols        = symbols
     state.timeframe       = body.get('timeframe', scanner.DEFAULT_TIMEFRAME)
     state.lookback         = int(body.get('lookback', scanner.DEFAULT_LOOKBACK))
     state.min_margin       = int(body.get('min_margin', scanner.DEFAULT_MIN_MARGIN))
-    state.scope            = scope
+    state.exchange          = exchange
+    state.sector            = sector
     state.min_market_cap   = min_market_cap
     state.running          = True
     state.last_error       = None
@@ -287,35 +299,104 @@ def clear_signals():
     return {'ok': True}
 
 
+def sector_summary(signals: list[dict], sector_map: dict[str, str], today: str) -> list[dict]:
+    """
+    Group today's signals by sector, for the "Today's Signals by Sector" panel.
+
+    Pulled out as a pure function so it's testable without spinning up the
+    HTTP layer or hitting the sector map's own network call — see
+    server/tests/test_web.py. `today` is a 'YYYY-MM-DD' string; signals whose
+    time doesn't start with it are excluded. A symbol missing from sector_map
+    (below the sector map's own market cap floor, or a delisting/rename
+    the screener no longer carries) is grouped under 'Unknown' rather than
+    silently dropped — the daily total across sectors should still add up to
+    the actual number of signals today.
+    """
+    todays = [s for s in signals if str(s.get('time', ''))[:10] == today]
+
+    buckets: dict[str, dict] = {}
+    for s in todays:
+        sector = sector_map.get(s.get('symbol'), 'Unknown')
+        b = buckets.setdefault(sector, {'sector': sector, 'total': 0, 'buys': 0,
+                                        'sells': 0, 'beat_bench': 0, '_excess_sum': 0.0})
+        b['total'] += 1
+        if s.get('direction') == 'BUY':
+            b['buys'] += 1
+        elif s.get('direction') == 'SELL':
+            b['sells'] += 1
+        excess = s.get('excess_roi') or 0
+        b['_excess_sum'] += excess
+        if excess > 0:
+            b['beat_bench'] += 1
+
+    rows = [{
+        'sector':     b['sector'],
+        'total':      b['total'],
+        'buys':       b['buys'],
+        'sells':      b['sells'],
+        'beat_bench': b['beat_bench'],
+        'avg_excess': round(b['_excess_sum'] / b['total'], 2),
+    } for b in buckets.values()]
+    rows.sort(key=lambda r: -r['total'])
+    return rows
+
+
+@app.get('/api/signals/sector-summary')
+async def get_sector_summary():
+    """
+    Today's signals grouped by sector.
+
+    "Today" is the NYSE-local date (scraping.get_exchange_time), matching
+    what signals are actually keyed on — a daily bar's date, not a wall-clock
+    timestamp in the server's or browser's own timezone.
+    """
+    today = scraping.get_exchange_time().strftime('%Y-%m-%d')
+    signals = signal_log.load_signals()
+    try:
+        sector_map = await asyncio.to_thread(scraping.get_sector_map)
+    except Exception as e:
+        raise HTTPException(502, f'Failed to load the sector map: {e}')
+    return json_ok({'date': today, 'sectors': sector_summary(signals, sector_map, today)})
+
+
 # ---------------------------------------------------------------------------
 # Symbol detail — candles, indicators, backtest table, verdict
 # ---------------------------------------------------------------------------
 
 @app.get('/api/universe')
-async def get_universe(min_market_cap: float = scraping.DEFAULT_MIN_MARKET_CAP):
+async def get_universe(min_market_cap: float = scraping.DEFAULT_MIN_MARKET_CAP,
+                       exchange: str = 'all', sector: str | None = None):
     """
     Symbol picker autocomplete — the same US-equities universe the scanner
-    itself uses, so 'pick a symbol and Analyse' covers whatever the scan
-    covers. scraping.get_us_equities() caches this internally (6h TTL, keyed
-    by min_market_cap), so repeated page loads don't re-hit Yahoo's screener.
+    itself uses (same exchange/sector/market-cap filters), so 'pick a symbol
+    and Analyse' covers whatever the scan covers. scraping.get_us_equities()
+    caches this internally (6h TTL, keyed by all three filters), so repeated
+    page loads don't re-hit Yahoo's screener.
     """
+    exchanges = _resolve_exchanges(exchange)
+    sector = _resolve_sector(sector)
     try:
-        equities = await asyncio.to_thread(scraping.get_us_equities, min_market_cap)
+        equities = await asyncio.to_thread(
+            scraping.get_us_equities, min_market_cap, exchanges, sector)
     except Exception as e:
         raise HTTPException(502, f'Failed to load the US equities universe: {e}')
     return json_ok([{'name': e['name'], 'symbol': e['symbol']} for e in equities])
 
 
 @app.get('/api/universe/count')
-async def get_universe_count(min_market_cap: float = scraping.DEFAULT_MIN_MARKET_CAP):
+async def get_universe_count(min_market_cap: float = scraping.DEFAULT_MIN_MARKET_CAP,
+                             exchange: str = 'all', sector: str | None = None):
     """
-    Just the size of the universe a market cap threshold resolves to — for the
-    dashboard's slider to show a real number instead of a guess as the user
-    drags it. Backed by the same cache as /api/universe, so this is cheap for
-    any threshold already looked up this session.
+    Just the size of the universe an exchange/sector/market-cap filter
+    resolves to — for the dashboard's slider to show a real number instead of
+    a guess as the user drags it. Backed by the same cache as /api/universe,
+    so this is cheap for any combination already looked up this session.
     """
+    exchanges = _resolve_exchanges(exchange)
+    sector = _resolve_sector(sector)
     try:
-        equities = await asyncio.to_thread(scraping.get_us_equities, min_market_cap)
+        equities = await asyncio.to_thread(
+            scraping.get_us_equities, min_market_cap, exchanges, sector)
     except Exception as e:
         raise HTTPException(502, f'Failed to load the US equities universe: {e}')
     return {'count': len(equities), 'min_market_cap': min_market_cap}
@@ -430,8 +511,42 @@ async def get_symbol(symbol: str, interval: str = '1d', period: str = '2y',
             'industry':         info.get('industry'),
             'employees':        info.get('fullTimeEmployees'),
             'website':          info.get('website'),
+            'pe_ratio':         info.get('trailingPE'),
+            'forward_pe_ratio': info.get('forwardPE'),
         },
     })
+
+
+@app.get('/api/symbol/{symbol}/entry-price')
+async def get_symbol_entry_price(symbol: str,
+                                 direction: str = Query(..., pattern='^(BUY|SELL)$')):
+    """
+    A suggested limit price to get into a position, derived from the last
+    ~10 days of hourly bars rather than the daily/weekly signal price — see
+    strategy.suggest_entry_price for the reasoning.
+
+    Kept as its own endpoint (same reasoning as /news and /signal-history):
+    it needs a second, hourly-interval fetch that the main chart doesn't, so
+    it shouldn't be able to slow down or break loading the chart itself.
+    """
+    symbol = scraping.yahoo_symbol(symbol)
+
+    def _fetch():
+        return scraping.get_stock_data(
+            symbol, interval='1h', DAYS=10,
+            return_flags={'DF': True, 'INDICATORS': True})
+
+    data = await asyncio.to_thread(_fetch)
+    df = data.get('DF')
+    if df is None or df.empty:
+        raise HTTPException(404, f'No hourly data for {symbol}')
+
+    df_pl = pl.from_pandas(df, include_index=True)
+    suggestion = strategy.suggest_entry_price(df_pl, direction)
+    if suggestion is None:
+        raise HTTPException(404, f'Not enough recent hourly history for {symbol}')
+
+    return json_ok({'symbol': symbol, 'direction': direction, **suggestion})
 
 
 @app.get('/api/symbol/{symbol}/news')

@@ -491,7 +491,26 @@ def get_stocks():
 # three exchanges that between them list virtually every US common stock.
 US_EQUITY_EXCHANGES = ('NMS', 'NYQ', 'ASE')
 
+# UI-facing "Universe" control -> the exchange(s) it scans. Keys match what
+# the web app's exchange-select sends.
+EXCHANGE_GROUPS = {
+    'all':    US_EQUITY_EXCHANGES,
+    'nasdaq': ('NMS',),
+    'nyse':   ('NYQ',),
+    'amex':   ('ASE',),
+}
+
 DEFAULT_MIN_MARKET_CAP = 2_000_000_000   # $2B — mid-cap and up; ~2,100 symbols as of writing
+
+# Yahoo's sector taxonomy (GICS-derived) — every value the "Sector" filter on
+# the web app's screener can be set to. Fixed set, not derived from data:
+# unlike market cap, Yahoo's screener query needs an exact string match, and
+# the 'eq' operator does not do a "list distinct sectors" query for us.
+GICS_SECTORS = (
+    'Technology', 'Healthcare', 'Financial Services', 'Consumer Cyclical',
+    'Industrials', 'Communication Services', 'Consumer Defensive',
+    'Energy', 'Utilities', 'Real Estate', 'Basic Materials',
+)
 
 # Yahoo's ticker suffix convention: -PA.._PZ marks a preferred share series,
 # -WT/-WS a warrant, -U a unit, -R/-RT a right. A share CLASS suffix (BRK-B,
@@ -511,6 +530,7 @@ def _is_common_stock(symbol: str) -> bool:
 
 def get_us_equities(min_market_cap: float = DEFAULT_MIN_MARKET_CAP,
                     exchanges: tuple = US_EQUITY_EXCHANGES,
+                    sector: str | None = None,
                     max_results: int | None = None) -> list[dict]:
     """
     All US-exchange-listed common stocks above a market cap floor.
@@ -529,21 +549,27 @@ def get_us_equities(min_market_cap: float = DEFAULT_MIN_MARKET_CAP,
             there is no hard ceiling here, only in what a caller then does
             with the result.
         exchanges: Yahoo exchange codes to include.
+        sector: Optional exact match against Yahoo's sector taxonomy (see
+            GICS_SECTORS) — filtered server-side, same as market cap. None
+            means every sector.
         max_results: Optional cap on how many symbols to return (still sorted
             by market cap descending, so this keeps the largest names).
 
     Returns:
         [{'symbol', 'name', 'market_cap'}, ...] sorted by market cap descending.
     """
-    cache_key = (round(min_market_cap), tuple(exchanges), max_results)
+    cache_key = (round(min_market_cap), tuple(exchanges), sector, max_results)
     cached = _us_equities_cache.get(cache_key)
     if cached and (datetime.now() - cached[0]) < _US_EQUITIES_CACHE_TTL:
         return cached[1]
 
-    query = yf.EquityQuery('and', [
+    clauses = [
         yf.EquityQuery('is-in', ['exchange', *exchanges]),
         yf.EquityQuery('gt', ['intradaymarketcap', min_market_cap]),
-    ])
+    ]
+    if sector:
+        clauses.append(yf.EquityQuery('eq', ['sector', sector]))
+    query = yf.EquityQuery('and', clauses)
 
     page_size = 250
     results = []
@@ -579,6 +605,45 @@ def get_us_equities(min_market_cap: float = DEFAULT_MIN_MARKET_CAP,
 
     _us_equities_cache[cache_key] = (datetime.now(), results)
     return results
+
+
+_sector_map_cache: dict = {}
+_SECTOR_MAP_CACHE_TTL = timedelta(hours=6)
+
+# Coverage floor for the sector map, distinct from DEFAULT_MIN_MARKET_CAP:
+# this backs sector *labelling* (e.g. "what sector did today's signals come
+# from"), not a scan universe, so it should recognise as many symbols as
+# plausible rather than match whatever cap floor one particular scan used.
+SECTOR_MAP_MIN_MARKET_CAP = 100_000_000   # $100M — micro-cap and up
+
+
+def get_sector_map(min_market_cap: float = SECTOR_MAP_MIN_MARKET_CAP,
+                   exchanges: tuple = US_EQUITY_EXCHANGES) -> dict[str, str]:
+    """
+    {symbol: sector} for every US equity above min_market_cap, across all of
+    GICS_SECTORS.
+
+    Yahoo's screener quotes do not actually carry a 'sector' field (confirmed
+    empirically — every quote comes back with sector=None), so the only way
+    to label a symbol's sector from the screener is to already know which
+    sector query it matched. This runs one get_us_equities() call per sector
+    — still a handful of batched, paginated requests total, not one .info
+    call per symbol — and tags every symbol in each result with the sector
+    that was queried for it.
+    """
+    cache_key = (round(min_market_cap), tuple(exchanges))
+    cached = _sector_map_cache.get(cache_key)
+    if cached and (datetime.now() - cached[0]) < _SECTOR_MAP_CACHE_TTL:
+        return cached[1]
+
+    mapping: dict[str, str] = {}
+    for sector in GICS_SECTORS:
+        equities = get_us_equities(min_market_cap, exchanges=exchanges, sector=sector)
+        for e in equities:
+            mapping[e['symbol']] = sector
+
+    _sector_map_cache[cache_key] = (datetime.now(), mapping)
+    return mapping
 
 
 def get_exchange_time() -> datetime:

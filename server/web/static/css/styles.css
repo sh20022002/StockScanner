@@ -80,6 +80,7 @@ html, body {
   display: grid;
   grid-template-columns: 260px 1fr 1fr;
   grid-template-areas:
+    "sector  sector    sector"
     "rail    metrics  metrics"
     "rail    feed      chart"
     "rail    dist       chart"
@@ -90,6 +91,7 @@ html, body {
   margin: 0 auto;
 }
 
+.sector-stats-panel { grid-area: sector; }
 .control-rail { grid-area: rail; }
 .metrics-row  { grid-area: metrics; display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 .feed-panel   { grid-area: feed; }
@@ -101,7 +103,7 @@ html, body {
   .layout {
     grid-template-columns: 1fr;
     grid-template-areas:
-      "rail" "metrics" "feed" "chart" "dist" "history";
+      "sector" "rail" "metrics" "feed" "chart" "dist" "history";
   }
   .metrics-row { grid-template-columns: repeat(2, 1fr); }
 }
@@ -158,7 +160,17 @@ html, body {
 .field input[type="range"] { width: 100%; accent-color: var(--blue); }
 .field-note { color: var(--text-mute); font-size: 0.9em; }
 
-.control-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
+.cap-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.cap-chip {
+  background: var(--bg-inset); border: 1px solid var(--border); border-radius: 999px;
+  color: var(--text-dim); font-size: 0.76em; font-family: var(--sans);
+  padding: 3px 10px; cursor: pointer; transition: filter 0.12s, color 0.12s, border-color 0.12s;
+}
+.cap-chip:hover { filter: brightness(1.25); color: var(--text); }
+.cap-chip.active {
+  color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, var(--border));
+  background: color-mix(in srgb, var(--blue) 12%, var(--bg-inset));
+}
 
 .btn {
   flex: 1;
@@ -174,12 +186,72 @@ html, body {
 }
 .btn:hover:not(:disabled) { filter: brightness(1.25); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-start { border-color: color-mix(in srgb, var(--green) 40%, var(--border)); color: var(--green); }
-.btn-stop  { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
 .btn-ghost { width: 100%; color: var(--text-dim); }
 
 .hint { font-size: 0.78em; color: var(--text-mute); margin: 6px 0 0; }
 .error { font-size: 0.78em; color: var(--red); margin: 6px 0 0; }
+
+/* ── Modern toggle switch ──────────────────────────────────────────────
+   Reusable switch component (currently the scanner's Start/Stop control,
+   the only real on/off toggle in this app) — an iOS/Material-style pill
+   with a sliding thumb, in place of separate Start/Stop buttons. */
+
+.switch-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.switch-row-label { font-size: 0.82em; color: var(--text-dim); flex: 1; }
+.switch-row-state { font-size: 0.78em; color: var(--text-mute); font-family: var(--mono); min-width: 52px; }
+
+.switch {
+  position: relative;
+  width: 42px; height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.18s, border-color 0.18s;
+}
+.switch:hover { filter: brightness(1.2); }
+.switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.switch .switch-thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--text-mute);
+  transition: transform 0.18s ease, background 0.18s;
+}
+.switch[aria-checked="true"] {
+  background: color-mix(in srgb, var(--green) 25%, var(--bg-inset));
+  border-color: color-mix(in srgb, var(--green) 50%, var(--border));
+}
+.switch[aria-checked="true"] .switch-thumb {
+  background: var(--green);
+  transform: translateX(18px);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 60%, transparent);
+}
+
+/* ── Daily statistics by sector ────────────────────────────────────── */
+
+.sector-stats-panel .panel-head { margin-bottom: 10px; }
+.sector-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.sector-card {
+  background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px;
+}
+.sector-card-name {
+  font-weight: 600; font-size: 0.85em; margin-bottom: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sector-card-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: var(--mono); font-size: 0.78em; color: var(--text-dim); margin-bottom: 3px;
+}
+.sector-card-excess { font-family: var(--mono); font-size: 0.82em; font-weight: 700; margin-top: 4px; }
 
 /* ── Metrics tiles ──────────────────────────────────────────────────── */
 
@@ -248,6 +320,12 @@ html, body {
 .verdict-banner.buy  { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
 .verdict-banner.sell { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
 .verdict-banner.none { color: var(--text-dim); }
+
+.entry-price-banner {
+  margin: 0 0 10px; padding: 7px 12px; border-radius: 7px;
+  font-size: 0.8em; border: 1px solid var(--border); color: var(--text-dim);
+}
+.entry-price-banner strong { color: var(--text); font-family: var(--mono); font-weight: 600; }
 
 .chart-container { height: 380px; margin-top: 4px; position: relative; }
 .chart-placeholder {

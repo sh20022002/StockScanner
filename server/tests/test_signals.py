@@ -308,6 +308,79 @@ class TestUsEquitiesUniverse:
         assert result[0]['market_cap'] == 1e9
         assert result[0]['name'] == 'NVDA Inc'
 
+    def test_sector_adds_an_eq_clause_to_the_query(self):
+        scraping._us_equities_cache.clear()
+        captured = {}
+
+        def fake_screen(query, **kwargs):
+            captured['query'] = query
+            return self._page(['NVDA'], total=1)
+
+        with patch.object(scraping.yf, 'screen', side_effect=fake_screen):
+            scraping.get_us_equities(min_market_cap=1e9, sector='Technology')
+
+        operands = captured['query'].to_dict()['operands']
+        assert {'operator': 'EQ', 'operands': ['sector', 'Technology']} in operands
+
+    def test_no_sector_omits_the_eq_clause(self):
+        scraping._us_equities_cache.clear()
+        captured = {}
+
+        def fake_screen(query, **kwargs):
+            captured['query'] = query
+            return self._page(['NVDA'], total=1)
+
+        with patch.object(scraping.yf, 'screen', side_effect=fake_screen):
+            scraping.get_us_equities(min_market_cap=1e9)
+
+        operators = [op.get('operator') for op in captured['query'].to_dict()['operands']]
+        assert 'EQ' not in operators
+
+    def test_different_sectors_are_different_cache_entries(self):
+        scraping._us_equities_cache.clear()
+        with patch.object(scraping.yf, 'screen',
+                          return_value=self._page(['A'], total=1)) as mock_screen:
+            scraping.get_us_equities(min_market_cap=1e9, sector='Technology')
+            scraping.get_us_equities(min_market_cap=1e9, sector='Healthcare')
+            scraping.get_us_equities(min_market_cap=1e9)
+        assert mock_screen.call_count == 3
+
+
+class TestSectorMap:
+    def _page(self, symbols):
+        return {'total': len(symbols), 'quotes': [
+            {'symbol': s, 'shortName': f'{s} Inc', 'marketCap': 1e9} for s in symbols
+        ]}
+
+    def test_queries_once_per_gics_sector_and_tags_symbols(self):
+        scraping._us_equities_cache.clear()
+        scraping._sector_map_cache.clear()
+
+        # Give each sector query back exactly one, distinguishable symbol —
+        # sector name with spaces stripped so no two sectors collide (two
+        # GICS sector names share the "Consumer" prefix).
+        def fake_screen(query, **kwargs):
+            sector = next(op['operands'][1] for op in query.to_dict()['operands']
+                         if op.get('operator') == 'EQ')
+            return self._page([sector.replace(' ', '_').upper() + '_SYM'])
+
+        with patch.object(scraping.yf, 'screen', side_effect=fake_screen) as mock_screen:
+            mapping = scraping.get_sector_map(min_market_cap=1e9)
+
+        assert mock_screen.call_count == len(scraping.GICS_SECTORS)
+        assert len(mapping) == len(scraping.GICS_SECTORS)
+        assert mapping['TECHNOLOGY_SYM'] == 'Technology'
+        assert mapping['HEALTHCARE_SYM'] == 'Healthcare'
+
+    def test_caches_across_calls(self):
+        scraping._us_equities_cache.clear()
+        scraping._sector_map_cache.clear()
+        with patch.object(scraping.yf, 'screen',
+                          return_value=self._page(['NVDA'])) as mock_screen:
+            scraping.get_sector_map(min_market_cap=1e9)
+            scraping.get_sector_map(min_market_cap=1e9)
+        assert mock_screen.call_count == len(scraping.GICS_SECTORS)
+
 
 class TestCleanOHLCV:
     def _partial_tail(self):
@@ -1115,6 +1188,87 @@ class TestWhatIsSignal:
                 'risk_metrics': {'roi': 1.0}, 'signals': signals}]
         assert what_is_signal('a', res, 4) is None
         assert what_is_signal('a', res, n) is True
+
+
+# ---------------------------------------------------------------------------
+# suggest_entry_price tests
+# ---------------------------------------------------------------------------
+
+class TestSuggestEntryPrice:
+    def _hourly_df(self, closes, sma20=None):
+        n = len(closes)
+        closes = list(closes)
+        if sma20 is None:
+            sma20 = closes
+        return pl.DataFrame({
+            'Datetime': [datetime(2024, 1, 1) + timedelta(hours=i) for i in range(n)],
+            'Open':  closes,
+            'High':  [c + 0.5 for c in closes],
+            'Low':   [c - 0.5 for c in closes],
+            'Close': closes,
+            'SMA20': list(sma20),
+        })
+
+    def test_returns_none_for_invalid_direction(self):
+        df = self._hourly_df([100.0] * 10)
+        assert strategy.suggest_entry_price(df, 'HOLD') is None
+
+    def test_returns_none_for_empty_or_missing_df(self):
+        assert strategy.suggest_entry_price(None, 'BUY') is None
+        assert strategy.suggest_entry_price(pl.DataFrame(), 'BUY') is None
+
+    def test_returns_none_without_enough_bars(self):
+        df = self._hourly_df([100.0, 101.0, 102.0])
+        assert strategy.suggest_entry_price(df, 'BUY') is None
+
+    def test_returns_none_without_sma20_column(self):
+        df = self._hourly_df([100.0] * 10).drop('SMA20')
+        assert strategy.suggest_entry_price(df, 'BUY') is None
+
+    def test_buy_pulls_back_to_sma_when_price_extended_above_it(self):
+        closes = [100.0] * 19 + [110.0]     # last close spiked above its own SMA
+        df = self._hourly_df(closes, sma20=[100.0] * 20)
+        out = strategy.suggest_entry_price(df, 'BUY')
+        assert out['current_price'] == 110.0
+        assert out['entry_price'] == 100.0
+        assert out['distance_pct'] < 0
+        assert 'pullback' in out['basis']
+
+    def test_buy_entry_never_goes_below_recent_swing_low(self):
+        closes = [100.0] * 19 + [110.0]
+        # SMA implausibly far below anything actually traded recently.
+        df = self._hourly_df(closes, sma20=[50.0] * 20)
+        out = strategy.suggest_entry_price(df, 'BUY')
+        floor = min(closes) - 0.5   # Low = Close - 0.5 in the fixture
+        assert out['entry_price'] == pytest.approx(floor)
+
+    def test_buy_at_market_when_already_at_or_below_sma(self):
+        closes = [100.0] * 19 + [95.0]
+        df = self._hourly_df(closes, sma20=[100.0] * 20)
+        out = strategy.suggest_entry_price(df, 'BUY')
+        assert out['entry_price'] == out['current_price'] == 95.0
+        assert out['distance_pct'] == 0
+        assert 'current price' in out['basis']
+
+    def test_sell_pulls_back_to_sma_when_price_extended_below_it(self):
+        closes = [100.0] * 19 + [90.0]
+        df = self._hourly_df(closes, sma20=[100.0] * 20)
+        out = strategy.suggest_entry_price(df, 'SELL')
+        assert out['current_price'] == 90.0
+        assert out['entry_price'] == 100.0
+        assert out['distance_pct'] > 0
+
+    def test_sell_entry_never_goes_above_recent_swing_high(self):
+        closes = [100.0] * 19 + [90.0]
+        df = self._hourly_df(closes, sma20=[150.0] * 20)
+        out = strategy.suggest_entry_price(df, 'SELL')
+        ceiling = max(closes) + 0.5   # High = Close + 0.5 in the fixture
+        assert out['entry_price'] == pytest.approx(ceiling)
+
+    def test_lookback_bars_reported_matches_window_used(self):
+        df = self._hourly_df([100.0] * 60)
+        out = strategy.suggest_entry_price(df, 'BUY', lookback=25)
+        assert out['lookback_bars'] == 25
 
 
 # ---------------------------------------------------------------------------

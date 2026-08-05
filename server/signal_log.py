@@ -8,18 +8,12 @@ scanner task and its HTTP handlers can both use it. Signal semantics
 import html
 import json
 import os
-import re
 import tempfile
 import threading
 from pathlib import Path
 
 SIGNALS_FILE = Path(__file__).parent / "signals_log.json"
 MAX_HISTORY  = 500
-
-# Yahoo tickers: letters, digits, dots and hyphens only. Anything else is either
-# a typo or an injection attempt — user-entered symbols are persisted and later
-# rendered, so this is a security boundary, not just validation.
-_SYMBOL_RE = re.compile(r'^[A-Za-z0-9.\-]{1,10}$')
 
 # One process, potentially several concurrent requests/threads touching the file.
 _log_lock = threading.Lock()
@@ -28,10 +22,6 @@ _log_lock = threading.Lock()
 def esc(value) -> str:
     """Escape a value before it is interpolated into HTML."""
     return html.escape(str(value), quote=True)
-
-
-def valid_symbol(symbol: str) -> bool:
-    return bool(_SYMBOL_RE.match(symbol or ''))
 
 
 def load_signals() -> list[dict]:

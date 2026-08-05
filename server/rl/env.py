@@ -34,6 +34,10 @@ class TradingEnv:
         self.open = open_
         self.window = window
         self.cost_rate = commission + slippage
+        # Scales cost_rate at each step; stays 1.0 (full, realistic cost) for
+        # eval/backtest/live. train.py ramps this up from 0 over the first
+        # cost_warmup_frac of training — see config.PPOConfig's docstring.
+        self.cost_multiplier = 1.0
         self.reward_scale = reward_scale
         self.episode_length = episode_length
         self.rng = rng or np.random.default_rng()
@@ -83,7 +87,7 @@ class TradingEnv:
             raise ValueError(f'action must be 0/1/2, got {action}')
         target_pos = action - 1
         delta = abs(target_pos - self.pos)
-        cost = self.cost_rate * delta
+        cost = self.cost_rate * self.cost_multiplier * delta
         if delta:
             self.trades += 1
 

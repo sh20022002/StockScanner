@@ -50,6 +50,21 @@ page and pushes live signals to it over Server-Sent Events — no polling, no
 full-page reloads. The scanner runs as a background task inside that same
 process, started and stopped from the page itself:
 
+- **Today's Signals by Sector** — a row of cards at the top of the page,
+  today's signals grouped by GICS sector (count, buy/sell split, % that beat
+  buy-and-hold, average excess ROI). Sector comes from
+  `scraping.get_sector_map` — the screener's quotes don't actually carry a
+  `sector` field, so this queries `get_us_equities` once per GICS sector and
+  tags every symbol with the sector that was queried for it, the same
+  batched-not-per-symbol principle as the rest of universe fetching. Cached
+  6h, same as the universe itself.
+- **Scanner Controls** — Universe (all US exchanges / NASDAQ / NYSE / NYSE
+  American), Sector (any GICS sector or all of them), and a market cap floor
+  with quick-select tiers (Nano/Micro/Small/Mid/Large/Mega) alongside the
+  slider, which now spans $0–3000B instead of $0.1–50B. There is no "custom
+  symbol list" mode anymore — every scan goes through the same
+  exchange/sector/market-cap universe fetch. Start/Stop is a single toggle
+  switch rather than two buttons.
 - **Live Signal Feed** — updates the moment a scan finds something. Click any
   row (here or in Signal History below) to load that symbol.
 - **Chart & Backtest** — a candlestick chart (TradingView's Lightweight
@@ -61,13 +76,26 @@ process, started and stopped from the page itself:
   fired historically), with a table and a bar chart of each call's *real*
   return since it fired, signed so positive always means the call was right.
   That's the one number here that isn't a backtest artifact.
-- **Company & News** — sector, industry, market cap, analyst recommendation,
-  dividend, and business summary (`scraping.get_stock_data`'s existing `INFO`/
-  `SUMMARY` fetch — this was already being pulled from yfinance and simply
-  wasn't rendered anywhere until now), plus the latest headlines for the
-  symbol (`scraping.get_stock_news`, `yf.Ticker(...).news`). Both are
-  one-off lookups fired when you load a symbol, same rule as
-  `current_stock_price` — never called inside a scan loop.
+- **Company & News** — sector, industry, market cap, trailing/forward P/E,
+  analyst recommendation, dividend, and business summary
+  (`scraping.get_stock_data`'s existing `INFO`/`SUMMARY` fetch — this was
+  already being pulled from yfinance and simply wasn't rendered anywhere until
+  now), plus the latest headlines for the symbol (`scraping.get_stock_news`,
+  `yf.Ticker(...).news`). Both are one-off lookups fired when you load a
+  symbol, same rule as `current_stock_price` — never called inside a scan
+  loop.
+- **Suggested entry price** — once a symbol has a BUY/SELL verdict, a second
+  banner suggests a limit price to get in at, using the last ~10 days of
+  *hourly* bars (`GET /api/symbol/{symbol}/entry-price`,
+  `strategy.suggest_entry_price`) rather than the daily/weekly signal price.
+  The daily bar that fires a signal is too coarse to time an entry with —
+  price may already be extended well past the level that made the setup
+  attractive. The suggestion pulls the entry toward the hourly 20-period SMA
+  when price is stretched away from it (a pullback), floored/ceilinged by the
+  recent hourly swing low/high so it never suggests a price that hasn't
+  actually traded recently. If price is already through its own SMA, the
+  suggestion is just the current price — there's no better pullback level in
+  the window.
 - **Signal Distribution** — buy/sell split and an excess-ROI histogram,
   drawn on canvas.
 - **Signal History** — filterable table, CSV export.
@@ -103,12 +131,17 @@ same batching principle the rest of this pipeline already follows. Preferred
 shares, warrants, units and rights are filtered out by ticker suffix (a
 heuristic — Yahoo has no "is common stock" flag to check directly — documented
 in `scraping._is_common_stock`). Results are cached in-process for 6 hours per
-threshold.
+(market cap, exchange, sector) combination.
 
-Lower thresholds mean more symbols and proportionally longer scans — there's
-no hard ceiling, only what's practical to wait for. `--symbols` (CLI) or
-"Custom list" (dashboard) bypasses the universe fetch entirely for an explicit
-ticker list.
+The dashboard narrows this same fetch two more ways, both filtered
+server-side by the screener query rather than fetched-then-filtered:
+**Universe** picks the exchange(s) (`scraping.EXCHANGE_GROUPS`), and
+**Sector** restricts to one of `scraping.GICS_SECTORS`. `--symbols` still
+exists on the CLI for an explicit ticker list; the dashboard has no
+equivalent — every web scan goes through the universe fetch.
+
+Lower market-cap thresholds mean more symbols and proportionally longer scans
+— there's no hard ceiling, only what's practical to wait for.
 
 ### Rate limiting
 
@@ -215,13 +248,39 @@ next to strategy.py's own best rule-based strategy on the same window, so you
 can see whether either approach is worth anything before trusting it.
 
 **Read the backtest output skeptically.** A handful of PPO updates on a
-handful of symbols — the scale this repo runs by default, and the scale
-proven end-to-end while building this — mostly learns to sit flat and avoid
-transaction costs, which is a perfectly sane thing for an undertrained policy
-to learn and *not* evidence of a working trading strategy. Getting this to
-actually beat buy-and-hold needs materially more updates, more symbols, and
-probably more history than 2 years — this pipeline is built and verified to
-run all of that correctly; it hasn't been trained at that scale.
+handful of symbols is not enough data for genuine edge to emerge, and getting
+this to actually beat buy-and-hold needs materially more updates, more
+symbols, and probably more history than 2 years — this pipeline is built and
+verified to run all of that correctly; it hasn't been trained at that scale.
+
+That said, one specific failure mode *has* been diagnosed and fixed:
+under-training used to collapse the policy onto "always sit flat" rather than
+merely under-performing. A flat position costs nothing and returns exactly
+zero every step, so to a not-yet-informative policy it looks like the
+safest action available — measured on a real run, entropy fell from ~0.98 to
+~0.29 within 25 updates and validation excess-ROI got monotonically *worse*
+across evals as more symbols settled into zero trades. Three schedules in
+`PPOConfig`, all driven by training progress in `train.py`'s loop, target
+that directly:
+
+- **Transaction-cost warm-up** (`cost_warmup_frac`, default 0.3) — training
+  starts with `TradingEnv.cost_multiplier` at 0 (commission/slippage-free) so
+  the policy can learn genuine directional signal before cost makes "do
+  nothing" the locally rational move, then ramps linearly to the real cost
+  rate by 30% of the way through training and stays there. This is the
+  bigger lever of the three.
+- **Entropy annealing** (`entropy_coef` → `entropy_coef_final`) — starts
+  higher (0.02) and decays to 0.003 rather than sitting at one fixed value,
+  keeping exploration alive longer instead of letting it collapse early.
+- **Learning-rate annealing** (`lr` → `lr * lr_final_frac`) — standard linear
+  decay to 10% of the initial rate, for late-training stability.
+
+Re-run on the same 10 symbols and update count that originally exposed the
+collapse, the policy kept trading (non-zero, varying ROI) across the entire
+60-update run instead of decaying to exactly 0% by the end — the collapse is
+gone. Validation excess-ROI still isn't consistently positive at this budget;
+that remaining gap is the "needs more updates/symbols/history" problem above,
+not the flat-collapse problem this fixes.
 
 ### Use it live
 

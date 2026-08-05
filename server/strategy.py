@@ -910,3 +910,66 @@ def what_is_signal(best, backtest_res, n, min_margin: int = 2):
     if abs(buys - sells) < max(1, min_margin):
         return None
     return buys > sells
+
+
+def suggest_entry_price(df_hourly: pl.DataFrame, direction: str, lookback: int = 40) -> dict | None:
+    """
+    Suggest a limit price to get into a position, using recent hourly price
+    action instead of just handing back the last close.
+
+    The daily/weekly bars a signal fires on are too coarse to time an entry —
+    by the time a daily bar confirms a BUY, price may already be extended well
+    above the level that made the setup attractive. This looks at the last
+    `lookback` hourly bars and asks: is price currently stretched away from
+    its own short-term average, and if so, where would a pullback likely find
+    support (BUY) or resistance (SELL)?
+
+    Entry is pulled toward the hourly 20-period SMA when price is extended
+    past it, but never past the recent hourly swing extreme — that floor/
+    ceiling keeps the suggestion from drifting somewhere price hasn't
+    actually traded recently. When price is already at/through the SMA (no
+    pullback available within the window), the suggestion is just the current
+    price.
+
+    Args:
+        df_hourly: Hourly-interval OHLCV with indicators (needs SMA20).
+        direction: 'BUY' or 'SELL'.
+        lookback: How many trailing hourly bars define "recent".
+
+    Returns:
+        {'entry_price', 'current_price', 'distance_pct', 'basis',
+        'lookback_bars'}, or None if there isn't enough hourly history.
+    """
+    if df_hourly is None or df_hourly.is_empty() or direction not in ('BUY', 'SELL'):
+        return None
+    if 'SMA20' not in df_hourly.columns or 'Close' not in df_hourly.columns:
+        return None
+
+    df = df_hourly.tail(lookback)
+    if len(df) < 5:
+        return None
+
+    current_price = float(df['Close'][-1])
+    sma20 = float(df['SMA20'][-1])
+    if current_price <= 0:
+        return None
+
+    if direction == 'BUY':
+        floor = float(df['Low'].min())
+        entry = max(floor, min(sma20, current_price))
+    else:
+        ceiling = float(df['High'].max())
+        entry = min(ceiling, max(sma20, current_price))
+
+    at_market = abs(entry - current_price) < 1e-9
+    basis = ('no better hourly pullback level found - current price' if at_market
+             else 'pullback to the hourly 20-period SMA')
+    distance_pct = (entry - current_price) / current_price * 100
+
+    return {
+        'entry_price':    round(entry, 4),
+        'current_price':  round(current_price, 4),
+        'distance_pct':   round(distance_pct, 2),
+        'basis':          basis,
+        'lookback_bars':  len(df),
+    }

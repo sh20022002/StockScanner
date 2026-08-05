@@ -8,7 +8,10 @@ const state = {
   signals: [],
   filterDirection: 'All',
   filterSymbol: '',
+  sortBy: 'time',   // 'time' (newest first, server order) or 'confidence'
   status: null,
+  nextScanAt: null,   // epoch ms — set by applyStatus(), ticked down by tickNextScan()
+  scanBusy: false,    // true while a start/stop request is in flight — blocks double-clicks
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +31,25 @@ function signClass(v) {
 
 /* ── Status / metrics ─────────────────────────────────────────────────── */
 
+function fmtCountdown(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`;
+}
+
+// Runs once a second (see init below) so the "Next scan" tile counts down
+// live between status pushes, instead of the old static "~5m" estimate.
+function tickNextScan() {
+  const el = $('m-next');
+  const status = state.status;
+  if (!status || !status.running) { el.textContent = '—'; return; }
+  if (!status.market_open) { el.textContent = 'mkt closed'; return; }
+  if (state.nextScanAt == null) { el.textContent = 'starting…'; return; }
+  const remaining = state.nextScanAt - Date.now();
+  el.textContent = remaining <= 0 ? 'scanning…' : fmtCountdown(remaining);
+}
+
 function applyStatus(status) {
   state.status = status;
 
@@ -41,8 +63,10 @@ function applyStatus(status) {
   marketPill.dataset.state = status.market_open ? 'open' : 'closed';
   $('market-label').textContent = status.market_open ? 'market open' : 'market closed';
 
-  $('start-btn').disabled = status.running;
-  $('stop-btn').disabled = !status.running;
+  const toggle = $('scan-toggle');
+  toggle.setAttribute('aria-checked', String(status.running));
+  toggle.disabled = state.scanBusy === true;
+  $('scan-toggle-state').textContent = status.running ? 'Running' : 'Stopped';
 
   $('scan-error').hidden = !status.last_error;
   if (status.last_error) $('scan-error').textContent = `Error: ${status.last_error}`;
@@ -55,9 +79,14 @@ function applyStatus(status) {
     $('scan-hint').textContent = 'Not scanning.';
   }
 
-  $('m-next').textContent = status.running
-    ? (status.market_open ? `~${Math.round(status.scan_interval_s / 60)}m` : 'mkt closed')
-    : '—';
+  // Countdown target for the "Next scan" tile — recomputed on every status
+  // push (scan start/finish, or the initial /api/status fetch) and ticked
+  // down locally by tickNextScan() every second in between, so the UI
+  // doesn't need the server to push once per second just for a clock.
+  state.nextScanAt = (status.running && status.market_open)
+    ? (status.last_scan_at ? Date.parse(status.last_scan_at) : Date.now()) + status.scan_interval_s * 1000
+    : null;
+  tickNextScan();
 
   // RL has no on/off control — this pill only ever reports what's true.
   const rlPill = $('rl-pill');
@@ -83,12 +112,74 @@ async function refreshSummary() {
   try { applySummary(await Api.signalsSummary()); } catch (_) {}
 }
 
+function renderSectorStats(data) {
+  const grid = $('sector-stats-grid');
+  $('sector-stats-date').textContent = data.date ? `as of ${data.date}` : '';
+  const rows = data.sectors || [];
+  grid.innerHTML = '';
+
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'feed-empty';
+    empty.textContent = 'No signals yet today.';
+    grid.appendChild(empty);
+    return;
+  }
+
+  for (const r of rows) {
+    const card = document.createElement('div');
+    card.className = 'sector-card';
+
+    const name = document.createElement('div');
+    name.className = 'sector-card-name';
+    name.textContent = r.sector;
+    name.title = r.sector;
+
+    const countRow = document.createElement('div');
+    countRow.className = 'sector-card-row';
+    const totalSpan = document.createElement('span');
+    totalSpan.textContent = `${r.total} signal${r.total === 1 ? '' : 's'}`;
+    const beatSpan = document.createElement('span');
+    beatSpan.textContent = `${r.beat_bench}/${r.total} beat`;
+    countRow.append(totalSpan, beatSpan);
+
+    const dirRow = document.createElement('div');
+    dirRow.className = 'sector-card-row';
+    const buySpan = document.createElement('span');
+    buySpan.className = 'num-pos';
+    buySpan.textContent = `${r.buys} BUY`;
+    const sellSpan = document.createElement('span');
+    sellSpan.className = 'num-neg';
+    sellSpan.textContent = `${r.sells} SELL`;
+    dirRow.append(buySpan, sellSpan);
+
+    const excess = document.createElement('div');
+    excess.className = 'sector-card-excess ' + signClass(r.avg_excess);
+    excess.textContent = `${fmtPct(r.avg_excess)} avg excess`;
+
+    card.append(name, countRow, dirRow, excess);
+    grid.appendChild(card);
+  }
+}
+
+async function refreshSectorStats() {
+  try { renderSectorStats(await Api.sectorSummary()); } catch (_) {}
+}
+
 /* ── Feed ─────────────────────────────────────────────────────────────── */
 
 function feedRowMatches(sig) {
   if (state.filterDirection !== 'All' && sig.direction !== state.filterDirection) return false;
   if (state.filterSymbol && !sig.symbol.toUpperCase().includes(state.filterSymbol)) return false;
   return true;
+}
+
+function sortSignals(signals) {
+  if (state.sortBy !== 'confidence') return signals;
+  // Highest RL confidence first; signals without one (no RL checkpoint yet,
+  // or a symbol the live hook skipped) sink to the bottom rather than being
+  // dropped, so switching sort mode never hides a signal.
+  return [...signals].sort((a, b) => (b.rl_confidence ?? -1) - (a.rl_confidence ?? -1));
 }
 
 function buildFeedItem(sig) {
@@ -138,7 +229,7 @@ function buildFeedItem(sig) {
 function renderFeed() {
   const list = $('feed-list');
   list.innerHTML = '';
-  const visible = state.signals.filter(feedRowMatches).slice(0, 80);
+  const visible = sortSignals(state.signals.filter(feedRowMatches)).slice(0, 80);
   if (!visible.length) {
     const empty = document.createElement('div');
     empty.className = 'feed-empty';
@@ -155,6 +246,7 @@ function prependSignal(sig) {
   renderFeed();
   renderHistory();
   refreshSummary();
+  refreshSectorStats();
 }
 
 async function loadSignalsFromServer() {
@@ -163,6 +255,7 @@ async function loadSignalsFromServer() {
     renderFeed();
     renderHistory();
     refreshSummary();
+    refreshSectorStats();
   } catch (e) { console.error(e); }
 }
 
@@ -171,7 +264,7 @@ async function loadSignalsFromServer() {
 function renderHistory() {
   const tbody = $('history-tbody');
   tbody.innerHTML = '';
-  const rows = state.signals.filter(feedRowMatches).slice(0, 200);
+  const rows = sortSignals(state.signals.filter(feedRowMatches)).slice(0, 200);
 
   for (const s of rows) {
     const tr = document.createElement('tr');
@@ -182,6 +275,7 @@ function renderHistory() {
       fmtPct(s.roi), fmtPct(s.benchmark_roi), fmtPct(s.excess_roi),
       s.win_rate != null ? `${fmtNum(s.win_rate, 1)}%` : '—',
       s.trades ?? '—', s.strategy || '',
+      s.rl_confidence != null ? `${Math.round(s.rl_confidence * 100)}%` : '—',
     ];
     cells.forEach((val, i) => {
       const td = document.createElement('td');
@@ -195,9 +289,9 @@ function renderHistory() {
 }
 
 function exportCsv() {
-  const rows = state.signals.filter(feedRowMatches);
+  const rows = sortSignals(state.signals.filter(feedRowMatches));
   const header = ['time', 'symbol', 'direction', 'price', 'roi', 'benchmark_roi',
-                  'excess_roi', 'win_rate', 'trades', 'strategy'];
+                  'excess_roi', 'win_rate', 'trades', 'strategy', 'rl_confidence'];
   const lines = [header.join(',')];
   for (const s of rows) {
     lines.push(header.map(k => JSON.stringify(s[k] ?? '')).join(','));
@@ -216,9 +310,10 @@ async function loadSymbol(symbol) {
   $('symbol-input').value = symbol;
   const interval = $('chart-interval').value;
   const period = $('chart-period').value;
+  let data;
 
   try {
-    const data = await Api.symbol(symbol, { interval, period, overlays: 'SMA20,SMA50,SMA150' });
+    data = await Api.symbol(symbol, { interval, period, overlays: 'SMA20,SMA50,SMA150' });
     Charts.renderCandles(data);
 
     const banner = $('verdict-banner');
@@ -236,14 +331,15 @@ async function loadSymbol(symbol) {
 
     renderStrategyTable(data.strategies, data.best_strategy);
     renderCompanyInfo(data.meta);
+    if (data.verdict !== 'BUY' && data.verdict !== 'SELL') renderEntryPrice(null);
   } catch (e) {
     alert(`Failed to load ${symbol}: ${e.message}`);
     return;
   }
 
-  // Two independent, slower lookups — each in its own try/catch and fired
-  // together so one hiccuping (or being slow) doesn't hold up the other, and
-  // neither can take down the chart that already loaded fine.
+  // Independent, slower lookups — each in its own try/catch and fired
+  // together so one hiccuping (or being slow) doesn't hold up the others, and
+  // none of them can take down the chart that already loaded fine.
   await Promise.allSettled([
     (async () => {
       try {
@@ -261,7 +357,30 @@ async function loadSymbol(symbol) {
         console.error('news load failed', e);
       }
     })(),
+    (async () => {
+      if (data.verdict !== 'BUY' && data.verdict !== 'SELL') return;
+      try {
+        renderEntryPrice(await Api.symbolEntryPrice(symbol, data.verdict));
+      } catch (e) {
+        console.error('entry-price load failed', e);
+        renderEntryPrice(null);
+      }
+    })(),
   ]);
+}
+
+function renderEntryPrice(suggestion) {
+  const el = $('entry-price-banner');
+  if (!suggestion) { el.hidden = true; return; }
+  el.hidden = false;
+
+  const verb = suggestion.direction === 'BUY' ? 'Buy' : 'Sell';
+  const away = suggestion.distance_pct === 0
+    ? 'at the current price'
+    : `${Math.abs(suggestion.distance_pct)}% ${suggestion.distance_pct < 0 ? 'below' : 'above'} the current price`;
+
+  el.innerHTML = `Suggested entry (hourly): ${verb} near <strong>$${suggestion.entry_price.toFixed(2)}</strong> ` +
+    `— ${away} · ${suggestion.basis} (last ${suggestion.lookback_bars} hourly bars)`;
 }
 
 function renderCompanyInfo(meta) {
@@ -296,6 +415,8 @@ function renderCompanyInfo(meta) {
     facts.appendChild(el);
   };
   addFact('Market cap', fmtMarketCap(meta.market_cap));
+  addFact('P/E (TTM)', meta.pe_ratio ? meta.pe_ratio.toFixed(2) : null);
+  addFact('Fwd P/E', meta.forward_pe_ratio ? meta.forward_pe_ratio.toFixed(2) : null);
   addFact('Employees', meta.employees ? meta.employees.toLocaleString() : null);
   addFact('Dividend', meta.dividend && meta.dividend !== 'No Dividend' ? meta.dividend : null);
   if (meta.website) addFact('Website', null, meta.website);
@@ -485,11 +606,11 @@ function debounce(fn, ms) {
   };
 }
 
-const refreshUniverseCount = debounce(async (capDollars) => {
+const refreshUniverseCount = debounce(async () => {
   const note = $('market-cap-note');
   note.textContent = 'checking universe size…';
   try {
-    const { count } = await Api.universeCount(capDollars);
+    const { count } = await Api.universeCount(currentUniverseParams());
     note.textContent = `~${count.toLocaleString()} symbols. Lower = more symbols, longer scans.`;
   } catch (e) {
     note.textContent = 'Could not check universe size — it will still resolve on Start.';
@@ -500,45 +621,69 @@ function marketCapDollars() {
   return Number($('market-cap-range').value) * 1e9;
 }
 
-function wireControls() {
-  $('scope-select').addEventListener('change', (e) => {
-    const isCustom = e.target.value === 'custom';
-    $('custom-symbols-field').hidden = !isCustom;
-    $('market-cap-field').hidden = isCustom;
-  });
+// {exchange, sector, min_market_cap} — the three filters the scanner, the
+// universe-size check, and the symbol picker all resolve the same way.
+function currentUniverseParams() {
+  return {
+    exchange:       $('exchange-select').value,
+    sector:         $('sector-select').value,
+    min_market_cap: marketCapDollars(),
+  };
+}
 
+function fmtCapLabel(dollars) {
+  if (dollars <= 0) return 'No minimum';
+  if (dollars >= 1e12) return `$${(dollars / 1e12).toFixed(2)}T`;
+  if (dollars >= 1e9)  return `$${(dollars / 1e9).toFixed(1)}B`;
+  return `$${(dollars / 1e6).toFixed(0)}M`;
+}
+
+function applyMarketCap(capB) {
+  $('market-cap-range').value = capB;
+  $('market-cap-val').textContent = fmtCapLabel(capB * 1e9);
+  for (const chip of document.querySelectorAll('.cap-chip')) {
+    chip.classList.toggle('active', Number(chip.dataset.cap) === capB);
+  }
+  refreshUniverseCount();
+}
+
+function wireControls() {
   $('lookback-range').addEventListener('input', (e) => $('lookback-val').textContent = e.target.value);
   $('margin-range').addEventListener('input', (e) => $('margin-val').textContent = e.target.value);
 
-  $('market-cap-range').addEventListener('input', (e) => {
-    const b = Number(e.target.value);
-    $('market-cap-val').textContent = `$${b.toFixed(1)}B`;
-    refreshUniverseCount(b * 1e9);
-  });
+  $('market-cap-range').addEventListener('input', (e) => applyMarketCap(Number(e.target.value)));
+  for (const chip of document.querySelectorAll('.cap-chip')) {
+    chip.addEventListener('click', () => applyMarketCap(Number(chip.dataset.cap)));
+  }
 
-  $('start-btn').addEventListener('click', async () => {
-    const scope = $('scope-select').value;
-    const body = {
-      scope,
-      timeframe:  $('timeframe-select').value,
-      lookback:   Number($('lookback-range').value),
-      min_margin: Number($('margin-range').value),
-    };
-    if (scope === 'custom') {
-      body.symbols = $('custom-symbols').value.split(',').map(s => s.trim()).filter(Boolean);
-    } else {
-      body.min_market_cap = marketCapDollars();
-    }
-    $('scan-error').hidden = true;
+  $('exchange-select').addEventListener('change', () => refreshUniverseCount());
+  $('sector-select').addEventListener('change', () => refreshUniverseCount());
+
+  $('scan-toggle').addEventListener('click', async () => {
+    if (state.scanBusy) return;
+    state.scanBusy = true;
+    $('scan-toggle').disabled = true;
     try {
-      applyStatus(await Api.startScanner(body));
+      if (state.status && state.status.running) {
+        applyStatus(await Api.stopScanner());
+      } else {
+        const body = {
+          ...currentUniverseParams(),
+          timeframe:  $('timeframe-select').value,
+          lookback:   Number($('lookback-range').value),
+          min_margin: Number($('margin-range').value),
+        };
+        $('scan-error').hidden = true;
+        applyStatus(await Api.startScanner(body));
+      }
     } catch (e) {
       $('scan-error').hidden = false;
       $('scan-error').textContent = `Error: ${e.message}`;
+    } finally {
+      state.scanBusy = false;
+      $('scan-toggle').disabled = false;
     }
   });
-
-  $('stop-btn').addEventListener('click', async () => applyStatus(await Api.stopScanner()));
 
   $('clear-btn').addEventListener('click', async () => {
     if (!confirm('Clear all signal history?')) return;
@@ -556,6 +701,11 @@ function wireControls() {
   });
   $('feed-symbol').addEventListener('input', (e) => {
     state.filterSymbol = e.target.value.toUpperCase();
+    renderFeed();
+    renderHistory();
+  });
+  $('feed-sort').addEventListener('change', (e) => {
+    state.sortBy = e.target.value;
     renderFeed();
     renderHistory();
   });
@@ -593,7 +743,8 @@ async function loadUniverse() {
   connectStream();
   await Promise.all([loadSignalsFromServer(), loadUniverse()]);
   try { applyStatus(await Api.status()); } catch (_) {}
-  refreshUniverseCount(marketCapDollars());
+  applyMarketCap(Number($('market-cap-range').value));
   Charts.renderDonut(0, 0);
   Charts.renderHistogram([]);
+  setInterval(tickNextScan, 1000);
 })();

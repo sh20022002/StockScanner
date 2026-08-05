@@ -43,6 +43,18 @@ CHECKPOINTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chec
 BEST_CHECKPOINT = os.path.join(CHECKPOINTS_DIR, 'best.pt')
 
 
+def cost_ramp_at(progress: float, warmup_frac: float) -> float:
+    """0 -> 1 linear ramp over the first `warmup_frac` of training, then 1."""
+    if warmup_frac <= 0:
+        return 1.0
+    return min(1.0, max(0.0, progress) / warmup_frac)
+
+
+def linear_anneal(start: float, end: float, progress: float) -> float:
+    """Linear interpolation from `start` (progress=0) to `end` (progress=1)."""
+    return start + (end - start) * progress
+
+
 def build_train_envs(dataset: dict, cfg: TrainConfig, seed: int) -> list[TradingEnv]:
     envs = []
     for i, (symbol, d) in enumerate(sorted(dataset['per_symbol'].items())):
@@ -97,17 +109,35 @@ def train(cfg: TrainConfig, run_name: str, device: str, log=print) -> str:
     t0 = time.time()
 
     for update in range(1, cfg.ppo.total_updates + 1):
+        # progress in [0, 1] across the whole run — drives every schedule below.
+        progress = (update - 1) / max(1, cfg.ppo.total_updates - 1)
+
+        cost_ramp = cost_ramp_at(progress, cfg.ppo.cost_warmup_frac)
+        for env in train_envs:
+            env.cost_multiplier = cost_ramp
+
+        entropy_coef = linear_anneal(cfg.ppo.entropy_coef, cfg.ppo.entropy_coef_final, progress)
+
+        lr_now = linear_anneal(cfg.ppo.lr, cfg.ppo.lr * cfg.ppo.lr_final_frac, progress)
+        for group in optimizer.param_groups:
+            group['lr'] = lr_now
+
         batch = collect_rollout(model, train_envs, cfg.ppo.rollout_steps, device, rng)
-        stats = ppo_update(model, optimizer, batch, cfg.ppo, device, rng)
+        stats = ppo_update(model, optimizer, batch, cfg.ppo, device, rng,
+                           entropy_coef=entropy_coef)
         stats['update'] = update
         stats['elapsed_s'] = round(time.time() - t0, 1)
+        stats['cost_ramp'] = round(cost_ramp, 3)
+        stats['entropy_coef'] = round(entropy_coef, 4)
+        stats['lr'] = round(lr_now, 6)
 
         line = (f"[{update:>3}/{cfg.ppo.total_updates}] "
                 f"reward={stats['mean_reward']:+.4f} "
                 f"policy_loss={stats['policy_loss']:+.4f} "
                 f"value_loss={stats['value_loss']:.4f} "
                 f"entropy={stats['entropy']:.3f} "
-                f"clip%={stats['clip_frac']*100:.0f}")
+                f"clip%={stats['clip_frac']*100:.0f} "
+                f"cost={cost_ramp:.2f} ent_c={entropy_coef:.3f}")
 
         if update % cfg.ppo.eval_every == 0 or update == cfg.ppo.total_updates:
             val = evaluate_module.evaluate_dataset(

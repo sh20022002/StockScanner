@@ -221,6 +221,25 @@ class TestTradingEnv:
             env.reset()
             assert env._min_start <= env.t <= env._max_start
 
+    def test_cost_multiplier_scales_transaction_cost(self):
+        """
+        train.py ramps this from 0 -> 1 over the cost warm-up so the policy can
+        learn direction before friction makes "always flat" the safe local
+        optimum (see config.PPOConfig's docstring). Default of 1.0 must leave
+        eval/backtest/live cost accounting untouched.
+        """
+        env = self._tiny_env()
+        env.reset(start=env._min_start)
+        env.cost_multiplier = 0.0
+        _obs, reward, _done, info = env.step(2)     # flat -> long, would normally cost
+        assert info['cost'] == 0.0
+        assert reward == pytest.approx(0.0, abs=1e-9)
+
+        env.reset(start=env._min_start)
+        env.cost_multiplier = 0.5
+        _obs, _reward, _done, info = env.step(2)
+        assert info['cost'] == pytest.approx((0.0005 + 0.0005) * 0.5)
+
     def test_max_drawdown_tracks_losses(self):
         n = 20
         feats = np.zeros((n, 2), dtype=np.float32)
@@ -351,6 +370,59 @@ class TestPPOTraining:
         assert math.isfinite(stats['value_loss'])
         changed = any(not torch.allclose(b, a) for b, a in zip(before, model.parameters()))
         assert changed
+
+    def test_entropy_coef_override_is_used_instead_of_cfg(self):
+        """
+        train.py anneals entropy_coef update-to-update and passes the current
+        value in explicitly; cfg.entropy_coef must not silently win.
+        """
+        model = ActorCritic(n_features=4, cfg=TINY_MODEL_CFG)
+        envs = self._envs()
+        batch = collect_rollout(model, envs, min_steps=30, device='cpu',
+                                rng=np.random.default_rng(2))
+
+        cfg = PPOConfig(epochs_per_update=1, minibatch_size=8, entropy_coef=999.0)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+        # With entropy_coef=999 baked into cfg, an override of 0.0 must produce
+        # a materially different update than leaving the override unset.
+        state_before = {k: v.clone() for k, v in model.state_dict().items()}
+
+        ppo_update(model, optimizer, batch, cfg, 'cpu',
+                  np.random.default_rng(0), entropy_coef=0.0)
+        after_override = {k: v.clone() for k, v in model.state_dict().items()}
+
+        model.load_state_dict(state_before)
+        ppo_update(model, optimizer, batch, cfg, 'cpu', np.random.default_rng(0))
+        after_default = {k: v.clone() for k, v in model.state_dict().items()}
+
+        differs = any(not torch.allclose(after_override[k], after_default[k])
+                      for k in state_before)
+        assert differs
+
+
+# ---------------------------------------------------------------------------
+# train.py schedules
+# ---------------------------------------------------------------------------
+
+class TestTrainingSchedules:
+    def test_cost_ramp_zero_at_start_one_after_warmup(self):
+        import train as train_module
+
+        assert train_module.cost_ramp_at(0.0, warmup_frac=0.3) == 0.0
+        assert train_module.cost_ramp_at(0.15, warmup_frac=0.3) == pytest.approx(0.5)
+        assert train_module.cost_ramp_at(0.3, warmup_frac=0.3) == pytest.approx(1.0)
+        assert train_module.cost_ramp_at(1.0, warmup_frac=0.3) == 1.0
+
+    def test_cost_ramp_disabled_when_warmup_frac_is_zero(self):
+        import train as train_module
+        assert train_module.cost_ramp_at(0.0, warmup_frac=0.0) == 1.0
+
+    def test_linear_anneal_interpolates_start_to_end(self):
+        import train as train_module
+
+        assert train_module.linear_anneal(0.02, 0.003, 0.0) == pytest.approx(0.02)
+        assert train_module.linear_anneal(0.02, 0.003, 1.0) == pytest.approx(0.003)
+        assert train_module.linear_anneal(0.02, 0.003, 0.5) == pytest.approx(0.0115)
 
 
 # ---------------------------------------------------------------------------

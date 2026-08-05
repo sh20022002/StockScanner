@@ -99,8 +99,15 @@ def compute_gae(rewards: np.ndarray, values: np.ndarray, dones: np.ndarray,
 
 def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer,
                batch: RolloutBatch, cfg: PPOConfig, device: str,
-               rng: np.random.Generator) -> dict:
-    """One PPO update: several epochs of clipped-surrogate minibatch SGD over the batch."""
+               rng: np.random.Generator, entropy_coef: float | None = None) -> dict:
+    """
+    One PPO update: several epochs of clipped-surrogate minibatch SGD over the batch.
+
+    entropy_coef overrides cfg.entropy_coef when given — train.py anneals it
+    update-to-update; callers that don't care (tests, one-off updates) get
+    cfg.entropy_coef unchanged.
+    """
+    ent_coef = cfg.entropy_coef if entropy_coef is None else entropy_coef
     advantages, returns = compute_gae(batch.rewards, batch.values, batch.dones,
                                       cfg.gamma, cfg.gae_lambda)
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -132,7 +139,7 @@ def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer,
             value_loss = F.mse_loss(value, ret_t[mb_t])
             entropy_loss = -entropy.mean()
 
-            loss = policy_loss + cfg.value_coef * value_loss + cfg.entropy_coef * entropy_loss
+            loss = policy_loss + cfg.value_coef * value_loss + ent_coef * entropy_loss
 
             optimizer.zero_grad()
             loss.backward()
