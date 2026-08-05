@@ -100,8 +100,11 @@ process, started and stopped from the page itself:
   drawn on canvas.
 - **Signal History** — filterable table, CSV export.
 
-The app has **no authentication** — `--host` defaults to `127.0.0.1` on
-purpose. Don't bind `0.0.0.0` outside a network you trust.
+The app has **no authentication by default** — `--host` defaults to
+`127.0.0.1` on purpose. Don't bind `0.0.0.0` outside a network you trust
+unless you've set `SMARTRAID_USER`/`SMARTRAID_PASSWORD` (HTTP Basic Auth,
+`server/web/auth.py`) to gate it first. See [DEPLOY.md](DEPLOY.md) for
+putting this somewhere other people can reach it.
 
 ## How the rule-based scanner works
 

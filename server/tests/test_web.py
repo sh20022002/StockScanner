@@ -7,12 +7,14 @@ than pulling in a new dependency for one feature's worth of endpoint tests.
 
 Run with: pytest server/tests -v
 """
+import base64
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from web.app import call_performance, sector_summary
+from web.auth import verify_basic_auth
 
 
 class TestCallPerformance:
@@ -123,3 +125,44 @@ class TestSectorSummary:
 
     def test_no_signals_today_returns_empty(self):
         assert sector_summary([], self.SECTOR_MAP, '2026-08-05') == []
+
+
+def _basic_header(user, password):
+    token = base64.b64encode(f'{user}:{password}'.encode()).decode()
+    return f'Basic {token}'
+
+
+class TestVerifyBasicAuth:
+    def test_correct_credentials_pass(self):
+        header = _basic_header('alice', 'hunter2')
+        assert verify_basic_auth(header, 'alice', 'hunter2') is True
+
+    def test_wrong_password_fails(self):
+        header = _basic_header('alice', 'wrong')
+        assert verify_basic_auth(header, 'alice', 'hunter2') is False
+
+    def test_wrong_username_fails(self):
+        header = _basic_header('mallory', 'hunter2')
+        assert verify_basic_auth(header, 'alice', 'hunter2') is False
+
+    def test_missing_header_fails(self):
+        assert verify_basic_auth(None, 'alice', 'hunter2') is False
+
+    def test_non_basic_scheme_fails(self):
+        assert verify_basic_auth('Bearer sometoken', 'alice', 'hunter2') is False
+
+    def test_malformed_base64_fails_closed_not_open(self):
+        assert verify_basic_auth('Basic not-valid-base64!!!', 'alice', 'hunter2') is False
+
+    def test_missing_colon_separator_fails(self):
+        token = base64.b64encode(b'no-colon-here').decode()
+        assert verify_basic_auth(f'Basic {token}', 'alice', 'hunter2') is False
+
+    def test_empty_password_in_header_fails_against_real_password(self):
+        header = _basic_header('alice', '')
+        assert verify_basic_auth(header, 'alice', 'hunter2') is False
+
+    def test_username_with_embedded_colon_is_not_confused_with_password(self):
+        # 'partition' on the first colon: "a:b:c" -> user="a", password="b:c".
+        token = base64.b64encode(b'alice:pass:word').decode()
+        assert verify_basic_auth(f'Basic {token}', 'alice', 'pass:word') is True

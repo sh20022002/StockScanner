@@ -42,12 +42,15 @@ import scanner
 import scraping
 import signal_log
 import strategy
+from web.auth import BasicAuthMiddleware
 
 log = logging.getLogger('smartraid.web')
 
 STATIC_DIR = Path(__file__).parent / 'static'
 
 app = FastAPI(title='SmarTraid Monitor Station')
+# No-op unless SMARTRAID_USER/SMARTRAID_PASSWORD are both set — see web/auth.py.
+app.add_middleware(BasicAuthMiddleware)
 
 
 # ---------------------------------------------------------------------------
