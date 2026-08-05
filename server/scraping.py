@@ -1,8 +1,15 @@
 """All web scraping and data fetching functions."""
 from datetime import timedelta, datetime, time
+import random
+import re
+# datetime.time is already bound to the name `time` above, so the sleep
+# function needs its own name rather than `import time`.
+from time import sleep as _sleep
+
 import pandas as pd
 import polars as pl
 import yfinance as yf
+import yfinance.exceptions as yf_exceptions
 import pytz, os
 import requests
 
@@ -12,6 +19,60 @@ _REQUIRED = ['Open', 'High', 'Low', 'Close', 'Volume']
 
 # Minimum bars needed before the 150/200-period indicators mean anything.
 MIN_BARS = 50
+
+# ---------------------------------------------------------------------------
+# Retry with backoff for transient failures (rate limiting, network hiccups)
+# ---------------------------------------------------------------------------
+
+# Errors worth retrying: Yahoo rate-limiting us, or the network hiccuping.
+# Deliberately NOT retried: a bad/delisted symbol, a schema mismatch, or
+# anything else that will fail identically on the next attempt — retrying
+# those just burns time before failing anyway.
+_RETRYABLE_EXCEPTIONS = (
+    yf_exceptions.YFRateLimitError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+_RETRYABLE_MESSAGE_MARKERS = ('rate limit', 'too many requests', '429')
+
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_BASE_DELAY = 1.5   # seconds; doubles each attempt, plus jitter
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, _RETRYABLE_EXCEPTIONS):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _RETRYABLE_MESSAGE_MARKERS)
+
+
+def with_retries(fn, *args, retries: int = DEFAULT_RETRIES,
+                 base_delay: float = DEFAULT_RETRY_BASE_DELAY,
+                 label: str = '', **kwargs):
+    """
+    Call fn(*args, **kwargs), retrying with exponential backoff + jitter on
+    what looks like a transient rate-limit or network failure.
+
+    Re-raises immediately on anything else — a bad symbol or a real error in
+    how we're calling the API will fail the same way every time, so retrying
+    it just delays the failure instead of preventing it.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if attempt >= retries or not _is_retryable(e):
+                raise
+            delay = base_delay * (2 ** attempt) + random.uniform(0, base_delay)
+            tag = f' [{label}]' if label else ''
+            # Plain hyphen, not an em-dash: the default Windows console
+            # codepage can't encode it and this print would crash mid-retry.
+            print(f'[retry]{tag} {type(e).__name__}: {e} - '
+                  f'retrying in {delay:.1f}s ({attempt + 1}/{retries})')
+            _sleep(delay)
+    raise last_exc  # pragma: no cover — loop always returns or raises above
 
 
 def yahoo_symbol(symbol: str) -> str:
@@ -173,14 +234,11 @@ def batch_download(
         wanted = {yahoo_symbol(s): s for s in chunk}
 
         try:
-            raw = yf.download(
-                list(wanted),
-                period=period,
-                interval=interval,
-                group_by='ticker',
-                auto_adjust=True,
-                progress=False,
-                threads=True,
+            raw = with_retries(
+                yf.download, list(wanted),
+                period=period, interval=interval, group_by='ticker',
+                auto_adjust=True, progress=False, threads=True,
+                label=f'batch_download chunk {i // chunk_size + 1}/{n_chunks}',
             )
         except Exception as e:
             print(f'[batch_download] chunk {i//chunk_size + 1} error: {e}')
@@ -263,7 +321,11 @@ def get_stock_data(
     needs_info = any(return_flags.get(k) for k in ('SUMMARY', 'SUMMERY', 'MAX_KEY', 'DIVD', 'INFO'))
     if needs_info:
         try:
-            info = ticker.info
+            # ticker.info is a property (the network call happens on access), so
+            # it has to go through a lambda rather than being called directly —
+            # passing ticker.info itself would already have made the (possibly
+            # failing) request before with_retries ever saw it.
+            info = with_retries(lambda: ticker.info, label=f'{stock} info')
         except Exception as e:
             print(f'Error fetching info for {stock}: {e}')
 
@@ -286,9 +348,11 @@ def get_stock_data(
     if return_flags.get('DF'):
         try:
             if period is None:
-                df = ticker.history(start=start_date, end=end_date, interval=interval)
+                df = with_retries(ticker.history, start=start_date, end=end_date,
+                                  interval=interval, label=f'{stock} history')
             else:
-                df = ticker.history(period=period, interval=interval)
+                df = with_retries(ticker.history, period=period, interval=interval,
+                                  label=f'{stock} history')
         except Exception as e:
             print(f'Error fetching history for {stock}: {e}')
             return result
@@ -323,6 +387,54 @@ def get_stock_data(
     return result
 
 
+def get_stock_news(symbol: str, count: int = 10) -> list[dict]:
+    """
+    Latest news headlines for a symbol.
+
+    Only for one-off single-symbol lookups (same rule as current_stock_price):
+    do not call this inside a scan loop.
+
+    Returns:
+        [{'title', 'summary', 'publisher', 'link', 'published_at', 'content_type'}, ...]
+        Newest first, as yfinance returns them. Empty list on any failure —
+        news is a nice-to-have, not something that should break the caller.
+    """
+    try:
+        ticker = yf.Ticker(yahoo_symbol(symbol))
+        raw = with_retries(lambda: ticker.news, label=f'{symbol} news')
+    except Exception as e:
+        print(f'Error fetching news for {symbol}: {e}')
+        return []
+
+    items = []
+    for entry in raw[:count] if raw else []:
+        # yfinance nests article fields under 'content' as of the version this
+        # was written against; fall back to flat top-level keys in case that
+        # shape drifts again, rather than silently returning nothing.
+        content = entry.get('content') or entry
+        url_obj = content.get('clickThroughUrl') or content.get('canonicalUrl')
+        link = url_obj.get('url') if isinstance(url_obj, dict) else None
+        link = link or entry.get('link')
+
+        provider = content.get('provider')
+        publisher = provider.get('displayName') if isinstance(provider, dict) else None
+        publisher = publisher or entry.get('publisher')
+
+        title = content.get('title')
+        if not title:
+            continue
+        items.append({
+            'title':        title,
+            'summary':      content.get('summary'),
+            'publisher':    publisher,
+            'link':         link,
+            'published_at': content.get('pubDate') or entry.get('providerPublishTime'),
+            'content_type': content.get('contentType'),
+        })
+
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -338,7 +450,8 @@ def current_stock_price(symbol: str) -> float | None:
     the batch download already carries the last close.
     """
     try:
-        df = yf.Ticker(yahoo_symbol(symbol)).history(period='5d')
+        ticker = yf.Ticker(yahoo_symbol(symbol))
+        df = with_retries(ticker.history, period='5d', label=f'{symbol} price')
         if df.empty or 'Close' not in df.columns:
             return None
         close = df['Close'].dropna()
@@ -363,11 +476,109 @@ def get_stocks():
     """
     Return (names, symbols) for the S&P 500, with symbols already normalised
     to Yahoo's form so downstream callers never have to think about it.
+
+    Superseded as the scanner's default universe by get_us_equities(), which
+    covers the whole US market rather than one index. Kept because it's a
+    useful, cheap, smaller universe on its own.
     """
     tickers = get_tickers()
     names   = [t[1] for t in tickers]
     symbols = [yahoo_symbol(str(t[0])) for t in tickers]
     return names, symbols
+
+
+# NASDAQ Global/Global Select (NMS), NYSE (NYQ), NYSE American (ASE) — the
+# three exchanges that between them list virtually every US common stock.
+US_EQUITY_EXCHANGES = ('NMS', 'NYQ', 'ASE')
+
+DEFAULT_MIN_MARKET_CAP = 2_000_000_000   # $2B — mid-cap and up; ~2,100 symbols as of writing
+
+# Yahoo's ticker suffix convention: -PA.._PZ marks a preferred share series,
+# -WT/-WS a warrant, -U a unit, -R/-RT a right. A share CLASS suffix (BRK-B,
+# PBR-A) is a single letter with no leading P, so it survives this filter.
+# This is a heuristic — Yahoo's screener has no "is common stock" flag to
+# check against directly — but it is the documented convention and matches
+# what every other consumer of Yahoo tickers relies on.
+_NON_COMMON_SUFFIX = re.compile(r'-(P[A-Z]|W[TS]?|U|R|RT)$')
+
+_us_equities_cache: dict = {}
+_US_EQUITIES_CACHE_TTL = timedelta(hours=6)
+
+
+def _is_common_stock(symbol: str) -> bool:
+    return _NON_COMMON_SUFFIX.search(symbol) is None
+
+
+def get_us_equities(min_market_cap: float = DEFAULT_MIN_MARKET_CAP,
+                    exchanges: tuple = US_EQUITY_EXCHANGES,
+                    max_results: int | None = None) -> list[dict]:
+    """
+    All US-exchange-listed common stocks above a market cap floor.
+
+    Uses Yahoo's screener (yfinance's yf.screen/EquityQuery), which filters by
+    market cap server-side and returns up to 250 results per request — a
+    handful of paginated calls for the whole universe, not one HTTP call per
+    symbol. Fetching market cap for thousands of tickers via yf.Ticker(...).info
+    one at a time was the anti-pattern this project already removed once
+    (Strategy.__init__ used to fetch its own quote per symbol); this is the
+    batched equivalent for building the universe itself.
+
+    Args:
+        min_market_cap: Floor in dollars. Lower thresholds mean more symbols
+            and proportionally more paginated requests plus a longer scan —
+            there is no hard ceiling here, only in what a caller then does
+            with the result.
+        exchanges: Yahoo exchange codes to include.
+        max_results: Optional cap on how many symbols to return (still sorted
+            by market cap descending, so this keeps the largest names).
+
+    Returns:
+        [{'symbol', 'name', 'market_cap'}, ...] sorted by market cap descending.
+    """
+    cache_key = (round(min_market_cap), tuple(exchanges), max_results)
+    cached = _us_equities_cache.get(cache_key)
+    if cached and (datetime.now() - cached[0]) < _US_EQUITIES_CACHE_TTL:
+        return cached[1]
+
+    query = yf.EquityQuery('and', [
+        yf.EquityQuery('is-in', ['exchange', *exchanges]),
+        yf.EquityQuery('gt', ['intradaymarketcap', min_market_cap]),
+    ])
+
+    page_size = 250
+    results = []
+    seen = set()
+    offset = 0
+    total = None
+
+    while total is None or offset < total:
+        if max_results is not None and len(results) >= max_results:
+            break
+        page = with_retries(yf.screen, query, offset=offset, size=page_size,
+                            sortField='intradaymarketcap', sortAsc=False,
+                            label=f'get_us_equities offset={offset}')
+        total = page.get('total', 0)
+        quotes = page.get('quotes', [])
+        if not quotes:
+            break
+
+        for q in quotes:
+            symbol = q.get('symbol')
+            if not symbol or symbol in seen or not _is_common_stock(symbol):
+                continue
+            seen.add(symbol)
+            results.append({
+                'symbol':     symbol,
+                'name':       q.get('shortName') or q.get('longName') or symbol,
+                'market_cap': q.get('marketCap'),
+            })
+            if max_results is not None and len(results) >= max_results:
+                break
+
+        offset += len(quotes)
+
+    _us_equities_cache[cache_key] = (datetime.now(), results)
+    return results
 
 
 def get_exchange_time() -> datetime:

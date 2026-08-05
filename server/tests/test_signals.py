@@ -5,12 +5,13 @@ Run with: pytest server/tests -v
 import os
 import sys
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -138,6 +139,83 @@ class TestIsNYSEOpen:
             assert scraping.is_nyse_open() is False
 
 
+class TestWithRetries:
+    """
+    scraping.with_retries wraps every yfinance network call. These tests
+    mock scraping._sleep so retries don't actually wait — real backoff timing
+    is exercised only by the delay-calculation test below.
+    """
+
+    def test_succeeds_on_first_try_without_sleeping(self):
+        fn = MagicMock(return_value='ok')
+        with patch('scraping._sleep') as mock_sleep:
+            result = scraping.with_retries(fn)
+        assert result == 'ok'
+        assert fn.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_passes_args_and_kwargs_through(self):
+        fn = MagicMock(return_value='ok')
+        scraping.with_retries(fn, 'a', 'b', x=1, label='ignored-by-fn')
+        fn.assert_called_once_with('a', 'b', x=1)
+
+    def test_retries_on_rate_limit_error_then_succeeds(self):
+        import yfinance.exceptions as yf_exceptions
+        fn = MagicMock(side_effect=[yf_exceptions.YFRateLimitError(), 'ok'])
+        with patch('scraping._sleep'):
+            result = scraping.with_retries(fn, retries=3)
+        assert result == 'ok'
+        assert fn.call_count == 2
+
+    def test_retries_on_connection_error(self):
+        fn = MagicMock(side_effect=[requests.exceptions.ConnectionError('boom'), 'ok'])
+        with patch('scraping._sleep'):
+            assert scraping.with_retries(fn, retries=3) == 'ok'
+
+    def test_retries_on_timeout(self):
+        fn = MagicMock(side_effect=[requests.exceptions.Timeout('slow'), 'ok'])
+        with patch('scraping._sleep'):
+            assert scraping.with_retries(fn, retries=3) == 'ok'
+
+    def test_retries_on_message_that_looks_like_rate_limiting(self):
+        # Some failure paths surface a generic Exception with a descriptive
+        # message rather than a typed exception — this is the fallback net.
+        fn = MagicMock(side_effect=[Exception('429 Too Many Requests'), 'ok'])
+        with patch('scraping._sleep'):
+            assert scraping.with_retries(fn, retries=3) == 'ok'
+
+    def test_does_not_retry_non_transient_errors(self):
+        # A bad symbol or a real bug fails the same way every time — retrying
+        # it would just delay the failure, not prevent it.
+        fn = MagicMock(side_effect=ValueError('symbol not found'))
+        with patch('scraping._sleep') as mock_sleep:
+            with pytest.raises(ValueError):
+                scraping.with_retries(fn, retries=3)
+        assert fn.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_raises_last_exception_after_exhausting_retries(self):
+        import yfinance.exceptions as yf_exceptions
+        fn = MagicMock(side_effect=yf_exceptions.YFRateLimitError())
+        with patch('scraping._sleep'):
+            with pytest.raises(yf_exceptions.YFRateLimitError):
+                scraping.with_retries(fn, retries=2)
+        assert fn.call_count == 3   # initial attempt + 2 retries
+
+    def test_backoff_delay_grows_and_is_bounded(self):
+        import yfinance.exceptions as yf_exceptions
+        fn = MagicMock(side_effect=[yf_exceptions.YFRateLimitError(),
+                                    yf_exceptions.YFRateLimitError(), 'ok'])
+        delays = []
+        with patch('scraping._sleep', side_effect=lambda d: delays.append(d)):
+            scraping.with_retries(fn, retries=3, base_delay=1.0)
+        assert len(delays) == 2
+        # base_delay * 2**attempt, plus up to one base_delay of jitter.
+        assert 1.0 <= delays[0] <= 2.0
+        assert 2.0 <= delays[1] <= 3.0
+        assert delays[1] > delays[0] - 1.0   # later attempts wait at least as long
+
+
 class TestYahooSymbol:
     def test_class_share_dot_becomes_hyphen(self):
         # BRK.B / BF.B failed every scan before this translation existed.
@@ -149,6 +227,86 @@ class TestYahooSymbol:
 
     def test_plain_symbol_unchanged(self):
         assert scraping.yahoo_symbol('MSFT') == 'MSFT'
+
+
+class TestUsEquitiesUniverse:
+    def test_is_common_stock_filters_preferred_and_warrants(self):
+        # Share CLASS suffixes (single letter, no leading P) must survive.
+        assert scraping._is_common_stock('AAPL') is True
+        assert scraping._is_common_stock('BRK-B') is True
+        assert scraping._is_common_stock('PBR-A') is True
+        # Preferred series (-P + letter), warrants, units and rights must not.
+        assert scraping._is_common_stock('JPM-PC') is False
+        assert scraping._is_common_stock('BAC-PB') is False
+        assert scraping._is_common_stock('XYZ-WT') is False
+        assert scraping._is_common_stock('XYZ-WS') is False
+        assert scraping._is_common_stock('XYZ-U') is False
+        assert scraping._is_common_stock('XYZ-R') is False
+
+    def _page(self, symbols, total):
+        return {'total': total, 'quotes': [
+            {'symbol': s, 'shortName': f'{s} Inc', 'marketCap': 1e9} for s in symbols
+        ]}
+
+    def test_paginates_until_total_reached(self):
+        scraping._us_equities_cache.clear()
+        pages = [self._page(['A', 'B'], total=5),
+                self._page(['C', 'D'], total=5),
+                self._page(['E'], total=5)]
+        with patch.object(scraping.yf, 'screen', side_effect=pages) as mock_screen:
+            result = scraping.get_us_equities(min_market_cap=1e9)
+        assert [r['symbol'] for r in result] == ['A', 'B', 'C', 'D', 'E']
+        assert mock_screen.call_count == 3
+
+    def test_filters_preferred_shares_from_results(self):
+        scraping._us_equities_cache.clear()
+        page = self._page(['AAPL', 'JPM-PC', 'BRK-B'], total=3)
+        with patch.object(scraping.yf, 'screen', return_value=page):
+            result = scraping.get_us_equities(min_market_cap=1e9)
+        symbols = [r['symbol'] for r in result]
+        assert 'JPM-PC' not in symbols
+        assert {'AAPL', 'BRK-B'} <= set(symbols)
+
+    def test_respects_max_results(self):
+        scraping._us_equities_cache.clear()
+        page = self._page(['A', 'B', 'C', 'D', 'E'], total=100)
+        with patch.object(scraping.yf, 'screen', return_value=page):
+            result = scraping.get_us_equities(min_market_cap=1e9, max_results=3)
+        assert len(result) == 3
+
+    def test_caches_by_threshold(self):
+        scraping._us_equities_cache.clear()
+        page = self._page(['A'], total=1)
+        with patch.object(scraping.yf, 'screen', return_value=page) as mock_screen:
+            scraping.get_us_equities(min_market_cap=5e9)
+            scraping.get_us_equities(min_market_cap=5e9)
+        assert mock_screen.call_count == 1
+
+    def test_different_thresholds_not_conflated_by_cache(self):
+        scraping._us_equities_cache.clear()
+        with patch.object(scraping.yf, 'screen',
+                          return_value=self._page(['A'], total=1)) as mock_screen:
+            scraping.get_us_equities(min_market_cap=1e9)
+            scraping.get_us_equities(min_market_cap=2e9)
+        assert mock_screen.call_count == 2
+
+    def test_stops_on_empty_page_even_if_total_not_reached(self):
+        # A total that overclaims what the API actually has left must not spin forever.
+        scraping._us_equities_cache.clear()
+        with patch.object(scraping.yf, 'screen', side_effect=[
+            {'total': 10, 'quotes': [{'symbol': 'A', 'shortName': 'A', 'marketCap': 1e9}]},
+            {'total': 10, 'quotes': []},
+        ]):
+            result = scraping.get_us_equities(min_market_cap=1e9)
+        assert len(result) == 1
+
+    def test_sorted_by_market_cap_field_present(self):
+        scraping._us_equities_cache.clear()
+        page = self._page(['NVDA'], total=1)
+        with patch.object(scraping.yf, 'screen', return_value=page):
+            result = scraping.get_us_equities(min_market_cap=1e9)
+        assert result[0]['market_cap'] == 1e9
+        assert result[0]['name'] == 'NVDA Inc'
 
 
 class TestCleanOHLCV:
@@ -205,6 +363,75 @@ class TestCurrentStockPrice:
     def test_returns_none_on_exception(self):
         with patch('yfinance.Ticker', side_effect=Exception('network error')):
             assert scraping.current_stock_price('ERR') is None
+
+
+class TestGetStockNews:
+    def _nested_item(self, title='Some headline', with_link=True, publisher='Reuters'):
+        return {
+            'content': {
+                'title': title,
+                'summary': 'A summary.',
+                'pubDate': '2026-08-05T09:00:00Z',
+                'contentType': 'STORY',
+                'provider': {'displayName': publisher},
+                'clickThroughUrl': {'url': 'https://finance.yahoo.com/x'} if with_link else None,
+                'canonicalUrl': {'url': 'https://reuters.com/x'},
+            }
+        }
+
+    def test_parses_nested_content_shape(self):
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = [self._nested_item()]
+            news = scraping.get_stock_news('AAPL')
+        assert len(news) == 1
+        n = news[0]
+        assert n['title'] == 'Some headline'
+        assert n['publisher'] == 'Reuters'
+        assert n['link'] == 'https://finance.yahoo.com/x'
+        assert n['published_at'] == '2026-08-05T09:00:00Z'
+        assert n['content_type'] == 'STORY'
+
+    def test_falls_back_to_canonical_url_when_no_clickthrough(self):
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = [self._nested_item(with_link=False)]
+            news = scraping.get_stock_news('AAPL')
+        assert news[0]['link'] == 'https://reuters.com/x'
+
+    def test_drops_items_with_no_title(self):
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = [
+                self._nested_item(title=''), self._nested_item(title='Real headline'),
+            ]
+            news = scraping.get_stock_news('AAPL')
+        assert len(news) == 1
+        assert news[0]['title'] == 'Real headline'
+
+    def test_respects_count(self):
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = [self._nested_item(title=f'H{i}') for i in range(20)]
+            news = scraping.get_stock_news('AAPL', count=3)
+        assert len(news) == 3
+
+    def test_returns_empty_list_on_exception(self):
+        with patch('yfinance.Ticker', side_effect=Exception('network error')):
+            assert scraping.get_stock_news('ERR') == []
+
+    def test_returns_empty_list_when_no_news(self):
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = []
+            assert scraping.get_stock_news('QUIET') == []
+
+    def test_falls_back_to_flat_shape_without_content_key(self):
+        # Defends against the yfinance news schema drifting back to a flat shape.
+        with patch('yfinance.Ticker') as mock_ticker:
+            mock_ticker.return_value.news = [{
+                'title': 'Flat-shape headline', 'link': 'https://example.com/a',
+                'publisher': 'Example Wire', 'providerPublishTime': 1723000000,
+            }]
+            news = scraping.get_stock_news('AAPL')
+        assert news[0]['title'] == 'Flat-shape headline'
+        assert news[0]['link'] == 'https://example.com/a'
+        assert news[0]['publisher'] == 'Example Wire'
 
 
 class TestGetStockData:

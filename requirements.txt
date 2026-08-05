@@ -2,10 +2,6 @@
 #
 # This file was previously saved as UTF-16, which made `pip install -r
 # requirements.txt` fail before installing anything. Keep it UTF-8.
-#
-# Every entry below is imported somewhere in server/. Dropped from the old list
-# because nothing imported them: DateTime, deap (there is no genetic algorithm),
-# hmm, matplotlib-inline, pandas-datareader, zope.interface, pandas_ta.
 
 # --- core data ---
 numpy==1.26.4
@@ -19,11 +15,19 @@ pytz==2024.2
 lxml==5.3.0          # pandas.read_html parser for the Wikipedia S&P 500 table
 html5lib==1.1        # read_html fallback parser
 
-# --- dashboard ---
-streamlit==1.35.0
-plotly==5.15.0
+# --- monitor station (server/web) ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+sse-starlette==3.4.6
 
-# --- optional ML subsystem (prediction.py / training.py) ---
+# --- RL trading agent (server/rl) ---
+# This resolves a CUDA build on some platforms, which is a large download.
+# For a CPU-only install (all that's needed to run the tests or train on a
+# laptop):
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0
+
+# --- optional legacy ML subsystem (prediction.py / training.py) ---
 # Only needed to run the regime/price models, which also require MongoDB.
 scikit-learn==1.4.2
 joblib==1.4.2        # model serialisation, replaces raw pickle

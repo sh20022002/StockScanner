@@ -140,7 +140,8 @@ def scan(symbols: list[str],
          stock_data: dict | None = None,
          quiet: bool = False,
          min_margin: int = DEFAULT_MIN_MARGIN,
-         stop_event=None) -> list[dict]:
+         stop_event=None,
+         return_data: bool = False):
     """
     Download every symbol once, analyse them in parallel, return the signals.
 
@@ -154,9 +155,14 @@ def scan(symbols: list[str],
             (some sandboxed and frozen environments cannot spawn children).
         stock_data: Pre-fetched {symbol: frame}, to skip the download.
         stop_event: Optional threading.Event for cooperative cancellation.
+        return_data: If True, return (signals, stock_data) instead of just
+            signals — lets a caller (e.g. the RL live hook) reuse the same
+            batch-downloaded frames instead of re-fetching per symbol, which is
+            exactly the anti-pattern removed from the rest of this pipeline.
 
     Returns:
-        A list of signal dicts, as produced by analyse_symbol.
+        A list of signal dicts, as produced by analyse_symbol — or, with
+        return_data=True, (signals, stock_data).
     """
     if stock_data is None:
         stock_data = scraping.batch_download(
@@ -164,7 +170,7 @@ def scan(symbols: list[str],
             chunk_size=BATCH_SIZE, quiet=quiet)
 
     if not stock_data:
-        return []
+        return ([], {}) if return_data else []
 
     items = list(stock_data.items())
     workers = max_workers or default_workers()
@@ -172,6 +178,9 @@ def scan(symbols: list[str],
 
     def _cancelled() -> bool:
         return stop_event is not None and stop_event.is_set()
+
+    def _finish():
+        return (signals, stock_data) if return_data else signals
 
     if use_processes and workers > 1 and len(items) > 1:
         try:
@@ -193,7 +202,7 @@ def scan(symbols: list[str],
                         continue
                     if result:
                         signals.append(result)
-            return signals
+            return _finish()
         except Exception as e:
             print(f'[scan] process pool unavailable ({e}); running in-process.')
             signals.clear()
@@ -206,4 +215,4 @@ def scan(symbols: list[str],
         if result:
             signals.append(result)
 
-    return signals
+    return _finish()
