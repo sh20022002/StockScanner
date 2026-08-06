@@ -1,17 +1,20 @@
 """All web scraping and data fetching functions."""
-from datetime import timedelta, datetime, time
+import os
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, time, timedelta
+
 # datetime.time is already bound to the name `time` above, so the sleep
 # function needs its own name rather than `import time`.
 from time import sleep as _sleep
 
 import pandas as pd
 import polars as pl
+import pytz
+import requests
 import yfinance as yf
 import yfinance.exceptions as yf_exceptions
-import pytz, os
-import requests
 
 exchange_api_key = os.getenv('EXCHANGE_API_KEY')
 
@@ -280,6 +283,69 @@ def batch_download(
         if not quiet:
             print(f'  downloaded chunk {i//chunk_size + 1}/{n_chunks}'
                   f' ({len(result)} stocks ready so far)')
+
+    return result
+
+
+_fundamentals_cache: dict = {}
+_FUNDAMENTALS_CACHE_TTL = timedelta(hours=6)
+
+
+def _fetch_one_fundamentals(symbol: str) -> dict | None:
+    try:
+        info = with_retries(lambda: yf.Ticker(yahoo_symbol(symbol)).info,
+                            label=f'{symbol} fundamentals')
+    except Exception as e:
+        print(f'[get_fundamentals] {symbol}: {e}')
+        return None
+    pe, eps = info.get('trailingPE'), info.get('trailingEps')
+    if pe is None and eps is None:
+        return None
+    return {
+        'trailing_pe':  pe,
+        'forward_pe':   info.get('forwardPE'),
+        'trailing_eps': eps,
+        'forward_eps':  info.get('forwardEps'),
+    }
+
+
+def get_fundamentals(symbols: list, max_workers: int = 8, quiet: bool = False) -> dict:
+    """
+    Trailing P/E and EPS per symbol, for the long-term value screen.
+
+    Deliberately not part of batch_download's price path: ticker.info is a
+    separate, heavier network call per symbol (one HTTP round-trip each,
+    unlike the ~3 batched calls yf.download makes for the whole universe),
+    so it only runs for the on-demand screen that actually needs it, never
+    the auto-scan loop. Threaded (I/O-bound, same reasoning as
+    yf.download(threads=True) above) and cached for _FUNDAMENTALS_CACHE_TTL
+    since P/E and EPS don't move intrabar the way price does.
+
+    Returns {symbol: {'trailing_pe', 'forward_pe', 'trailing_eps', 'forward_eps'}},
+    omitting symbols a fetch failed for or that had neither figure.
+    """
+    now = datetime.now()
+    result: dict = {}
+    to_fetch = []
+    for sym in symbols:
+        cached = _fundamentals_cache.get(sym)
+        if cached and (now - cached[0]) < _FUNDAMENTALS_CACHE_TTL:
+            if cached[1] is not None:
+                result[sym] = cached[1]
+        else:
+            to_fetch.append(sym)
+
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_one_fundamentals, sym): sym for sym in to_fetch}
+            for done, future in enumerate(as_completed(futures), 1):
+                sym = futures[future]
+                fund = future.result()
+                _fundamentals_cache[sym] = (now, fund)
+                if fund is not None:
+                    result[sym] = fund
+                if not quiet and done % 25 == 0:
+                    print(f'  fundamentals {done}/{len(to_fetch)}')
 
     return result
 

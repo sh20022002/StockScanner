@@ -613,6 +613,64 @@ function renderStrategyTable(rows, best) {
   }
 }
 
+function renderLongTermScreen(rows) {
+  const table = $('long-term-table');
+  const tbody = $('long-term-tbody');
+  const empty = $('long-term-empty');
+  tbody.innerHTML = '';
+
+  const hasRows = !!(rows && rows.length);
+  table.hidden = !hasRows;
+  empty.hidden = hasRows;
+  if (!hasRows) {
+    empty.textContent = rows
+      ? 'No symbols in the current universe cleared the trend/P/E/EPS bars.'
+      : 'Click “Run Screen” to rank the current universe.';
+    return;
+  }
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.addEventListener('click', () => loadSymbol(r.symbol));
+
+    const vals = [
+      r.symbol, fmtNum(r.price), fmtNum(r.sma150), fmtNum(r.trend_ratio, 3),
+      fmtNum(r.pe_ratio), fmtNum(r.eps), `${fmtNum(r.earnings_yield, 1)}%`, fmtNum(r.score, 1),
+    ];
+    vals.forEach((v) => {
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+}
+
+async function runLongTermScreen() {
+  const btn = $('lt-run-btn');
+  const params = {
+    max_pe:    $('lt-max-pe').value,
+    min_trend: $('lt-min-trend').value,
+    max_trend: $('lt-max-trend').value,
+  };
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  $('long-term-empty').hidden = false;
+  $('long-term-empty').textContent = 'Running the screen against the current universe…';
+  $('long-term-table').hidden = true;
+  try {
+    const rows = await Api.longTermScreen(params);
+    renderLongTermScreen(rows);
+  } catch (e) {
+    $('long-term-empty').hidden = false;
+    $('long-term-empty').textContent = `Screen failed: ${e.message}`;
+    $('long-term-table').hidden = true;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔎 Run Screen';
+  }
+}
+
 function renderPastSignals(history) {
   const { symbol, signals } = history;
 
@@ -898,6 +956,8 @@ function wireControls() {
 
   $('export-btn').addEventListener('click', exportCsv);
   $('refresh-btn').addEventListener('click', refreshAll);
+
+  $('lt-run-btn').addEventListener('click', runLongTermScreen);
 }
 
 async function loadUniverse() {

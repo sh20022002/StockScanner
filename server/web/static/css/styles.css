@@ -484,6 +484,21 @@ tr.selected-row td { background: color-mix(in srgb, var(--blue) 10%, transparent
 .num-neg { color: var(--red); }
 .star { color: var(--amber); }
 
+/* ── Long-term value screen ────────────────────────────────────────── */
+
+.long-term-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.lt-field {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.8em; color: var(--text-dim); white-space: nowrap;
+}
+.lt-field input[type="number"] {
+  width: 64px; background: var(--bg-inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); padding: 5px 7px; font-size: 0.95em;
+}
+.long-term-table-wrap { overflow-x: auto; margin-top: 10px; }
+.long-term-table tbody tr { cursor: pointer; }
+.long-term-table tbody tr:hover td { background: var(--bg-inset); }
+
 /* ── Past signals ───────────────────────────────────────────────────── */
 
 .past-signals { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }

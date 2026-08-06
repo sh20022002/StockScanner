@@ -29,5 +29,6 @@ const Api = (() => {
     symbolNews:    (sym, count = 10) => req(`/api/symbol/${encodeURIComponent(sym)}/news?` + new URLSearchParams({ count })),
     symbolEntryPrice: (sym, direction) => req(`/api/symbol/${encodeURIComponent(sym)}/entry-price?` + new URLSearchParams({ direction })),
     symbolHmmProjection: (sym, params = {}) => req(`/api/symbol/${encodeURIComponent(sym)}/hmm-projection?` + new URLSearchParams(params)),
+    longTermScreen: (params = {}) => req('/api/long-term-screen?' + new URLSearchParams(params)),
   };
 })();

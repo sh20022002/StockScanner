@@ -40,6 +40,7 @@ except Exception as _rl_import_error:      # torch/RL stack is optional
 import polars as pl
 
 import hmm_forecast
+import long_term_screen
 import scanner
 import scraping
 import signal_log
@@ -447,6 +448,41 @@ async def get_universe_count(min_market_cap: float = scraping.DEFAULT_MIN_MARKET
     except Exception as e:
         raise HTTPException(502, f'Failed to load the US equities universe: {e}')
     return {'count': len(equities), 'min_market_cap': min_market_cap}
+
+
+@app.get('/api/long-term-screen')
+async def get_long_term_screen(
+    max_pe: float = long_term_screen.DEFAULT_MAX_PE,
+    min_trend: float = long_term_screen.DEFAULT_MIN_TREND_RATIO,
+    max_trend: float = long_term_screen.DEFAULT_MAX_TREND_RATIO,
+    limit: int = 50,
+):
+    """
+    On-demand long-term value screen: price above its SMA150 (uptrend) but
+    not overextended, a reasonable trailing P/E, and positive EPS — ranked
+    by a composite score. Runs against the scanner's current universe
+    (state.symbols), same set Start/Stop scans.
+
+    Deliberately its own button/endpoint rather than folded into the
+    auto-scan loop: P/E and EPS come from scraping.get_fundamentals, a
+    separate per-symbol network call the continuous scanner never needs to
+    pay for on every cycle.
+    """
+    if not state.symbols:
+        raise HTTPException(400, 'No symbols loaded — start the scanner or pick a universe first.')
+    try:
+        # Always daily bars: SMA150 means the standard 150-*day* moving
+        # average here regardless of what timeframe the auto-scanner is
+        # currently configured for (a 150-bar average of weekly/monthly
+        # candles would be a 3-12 year lookback, not the same indicator).
+        results = await asyncio.to_thread(
+            long_term_screen.screen, state.symbols, timeframe='1d',
+            max_pe=max_pe, min_trend_ratio=min_trend, max_trend_ratio=max_trend,
+            quiet=True,
+        )
+    except Exception as e:
+        raise HTTPException(502, f'Long-term screen failed: {e}')
+    return json_ok(results[:limit])
 
 
 def _candles(df: pl.DataFrame) -> list[dict]:

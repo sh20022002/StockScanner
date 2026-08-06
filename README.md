@@ -89,7 +89,7 @@ process, started and stopped from the page itself:
   direction, symbol, and **Horizon** (Long-term vs Short/Mid-term) — see the
   hint under the feed filters for what that means; the short version is it
   follows the bar interval a signal was detected on (`scanner.investment_horizon`),
-  not a separate long-term/fundamentals methodology this pipeline doesn't have.
+  a timeframe proxy, not the fundamentals-based Long-Term Value Screen below.
   A **⟳** button in the top bar force-refreshes status, signals, and the
   panels below without waiting for the next SSE push.
 - **Chart & Backtest** — a candlestick chart (TradingView's Lightweight
@@ -140,6 +140,20 @@ process, started and stopped from the page itself:
   actually traded recently. If price is already through its own SMA, the
   suggestion is just the current price — there's no better pullback level in
   the window.
+- **Long-Term Value Screen** — an on-demand, fundamentals-based ranking of
+  the scanner's current universe (`server/long_term_screen.py`,
+  `GET /api/long-term-screen`), separate from the 12 technical strategies:
+  price above its 150-day SMA but not more than ~50% above it (a real uptrend,
+  not overextended), a configurable-ceiling trailing P/E (default 35), and
+  positive trailing EPS. The trend check runs first against the OHLCV data
+  the scanner already batch-downloads for free; the per-symbol P/E/EPS
+  lookup (`scraping.get_fundamentals`, a `yf.Ticker(...).info` call per
+  symbol, threaded and cached 6h) only runs for the survivors, so a click on
+  "Run Screen" doesn't cost one network round-trip per symbol in the
+  universe. Results are ranked by a 0–100 score split evenly across trend
+  strength, valuation, and earnings yield (EPS/price). This is a pass/fail
+  screen, not a backtested strategy — P/E and EPS don't move bar-to-bar, so
+  there's no ROI column here the way there is for the other 12.
 - **Signal Distribution** — buy/sell split and an excess-ROI histogram,
   drawn on canvas.
 - **Signal History** — filterable table (same filters as the feed, plus a

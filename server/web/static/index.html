@@ -270,6 +270,43 @@
     </div>
   </section>
 
+  <!-- ── Long-Term Value Screen ───────────────────────────────────── -->
+  <section class="panel long-term-panel">
+    <div class="panel-head">
+      <h2 class="panel-title">Long-Term Value Screen</h2>
+      <div class="long-term-controls">
+        <label class="lt-field" title="Maximum trailing P/E to include">
+          Max P/E <input id="lt-max-pe" type="number" min="1" step="1" value="35">
+        </label>
+        <label class="lt-field" title="Minimum Close/SMA150 ratio (1.0 = price at its 150-day average)">
+          Min Price/SMA150 <input id="lt-min-trend" type="number" min="0.5" step="0.05" value="1.0">
+        </label>
+        <label class="lt-field" title="Maximum Close/SMA150 ratio, so an overextended stock doesn't rank">
+          Max Price/SMA150 <input id="lt-max-trend" type="number" min="1" step="0.05" value="1.5">
+        </label>
+        <button id="lt-run-btn" class="btn btn-start">🔎 Run Screen</button>
+      </div>
+    </div>
+    <p class="hint">
+      Ranks the current universe on a good long-term ratio between the 150-day moving
+      average, trailing P/E and EPS: price in a healthy uptrend above SMA150 (but not
+      overextended), a reasonable valuation, and real earnings behind it. A fundamentals
+      screen, not a backtested crossover strategy — no ROI figures apply.
+    </p>
+    <div class="long-term-table-wrap">
+      <table class="long-term-table" id="long-term-table" hidden>
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Price</th><th>SMA150</th><th>Price/SMA150</th>
+            <th>P/E</th><th>EPS</th><th>Earnings Yield</th><th>Score</th>
+          </tr>
+        </thead>
+        <tbody id="long-term-tbody"></tbody>
+      </table>
+    </div>
+    <div class="feed-empty" id="long-term-empty">Click &ldquo;Run Screen&rdquo; to rank the current universe.</div>
+  </section>
+
   <!-- ── Distribution mini-charts ─────────────────────────────────── -->
   <section class="panel dist-panel">
     <h2 class="panel-title">Signal Distribution</h2>
