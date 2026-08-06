@@ -57,7 +57,9 @@ process, started and stopped from the page itself:
   `sector` field, so this queries `get_us_equities` once per GICS sector and
   tags every symbol with the sector that was queried for it, the same
   batched-not-per-symbol principle as the rest of universe fetching. Cached
-  6h, same as the universe itself.
+  6h, same as the universe itself. Each card is tinted green/red by whether
+  its average excess ROI is positive or negative — the same number already
+  shown as text, just readable at a glance across the whole row.
 - **Scanner Controls** — Universe (all US exchanges / NASDAQ / NYSE / NYSE
   American), Sector (any GICS sector or all of them), and a market cap floor
   with quick-select tiers (Nano/Micro/Small/Mid/Large/Mega) alongside the
@@ -65,11 +67,53 @@ process, started and stopped from the page itself:
   symbol list" mode anymore — every scan goes through the same
   exchange/sector/market-cap universe fetch. Start/Stop is a single toggle
   switch rather than two buttons.
+
+  Starting the scanner always runs one scan immediately, even on an intraday
+  timeframe with the market closed (`web.app._should_scan_this_iteration`) —
+  otherwise the feed just sits empty until the market opens, which reads as
+  broken rather than "waiting." Every scan after that first one goes back to
+  the normal market-hours gating.
+
+  Changing any control *while the scanner is already running* doesn't take
+  effect immediately — it waits 10s of no further changes (so adjusting
+  three sliders in a row doesn't restart the scan three times), shows an
+  amber "restarting scan in Ns…" hint, then stops and restarts the scan with
+  the new settings. Stopped, the same controls behave as before: whatever
+  they say applies on the next manual Start. A scan actually in flight (not
+  just "running" — the batch download + strategy set can take a while) shows
+  a shimmering blue/green banner across the top of the page and a faster,
+  brighter pill in the top bar, both driven by a real `is_scanning` flag
+  (`web.app.ScannerState`), not a client-side guess.
 - **Live Signal Feed** — updates the moment a scan finds something. Click any
-  row (here or in Signal History below) to load that symbol.
+  row (here or in Signal History below) to load that symbol. Filterable by
+  direction, symbol, and **Horizon** (Long-term vs Short/Mid-term) — see the
+  hint under the feed filters for what that means; the short version is it
+  follows the bar interval a signal was detected on (`scanner.investment_horizon`),
+  not a separate long-term/fundamentals methodology this pipeline doesn't have.
+  A **⟳** button in the top bar force-refreshes status, signals, and the
+  panels below without waiting for the next SSE push.
 - **Chart & Backtest** — a candlestick chart (TradingView's Lightweight
   Charts, vendored locally, no CDN) with SMA overlays and buy/sell markers,
-  plus the full 12-strategy backtest table for whatever symbol you pick.
+  plus the full 12-strategy backtest table for whatever symbol you pick. Two
+  optional overlays, off by default:
+  - **Peaks & Troughs** — two straight trendlines computed client-side from
+    the loaded candles (`Charts.renderBounds`), not a rolling envelope. Both
+    anchor to "the bottom candle" (the lowest Open in the loaded window): the
+    Troughs line runs from its Open through the last confirming swing-low
+    Open after it; the Peaks line from its High through the last confirming
+    swing-high High after it. A swing point is the standard 3-candle
+    fractal — more extreme than the candle immediately before and after it.
+    Either line needs the bottom candle plus at least 2 confirming swings
+    after it or it isn't drawn at all — two points aren't a trend, and a
+    misleading line is worse than no line.
+  - **HMM projection** — a 3-state Gaussian HMM (`server/hmm_forecast.py`)
+    fit fresh on the chart's own data (no MongoDB, unlike the legacy
+    `server/prediction.py`), projected forward as a bold solid line (bright
+    pink, deliberately unmissable against price action) with a widening ~80%
+    band, plus a banner reporting the current regime (negative/neutral/positive)
+    and its posterior probability. Read this as "the expected path if the
+    fitted regime dynamics hold," not a price prediction — the band exists
+    specifically to keep that honest.
 - **Past Signals** — appears once you've loaded a symbol: every signal the
   scanner has ever recorded for it, plotted on the chart as hollow circles
   (distinct from the current backtest's arrows — these are what actually
@@ -98,7 +142,8 @@ process, started and stopped from the page itself:
   the window.
 - **Signal Distribution** — buy/sell split and an excess-ROI histogram,
   drawn on canvas.
-- **Signal History** — filterable table, CSV export.
+- **Signal History** — filterable table (same filters as the feed, plus a
+  Horizon column), CSV export.
 
 The app has **no authentication by default** — `--host` defaults to
 `127.0.0.1` on purpose. Don't bind `0.0.0.0` outside a network you trust

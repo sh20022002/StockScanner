@@ -47,6 +47,21 @@ _SCAN_INTERVALS = {
 }
 CLOSED_MARKET_SLEEP = 900
 
+# Bar intervals long enough that a signal detected on them implies a
+# multi-week-plus holding horizon rather than a days-long swing trade — the
+# same 12 rule-based strategies, just evaluated on slower-moving bars. This
+# is not a separate long-term/fundamentals methodology (there is no P/E or
+# dividend-growth screen in this pipeline) — it is a proxy for how long a
+# signal detected at this bar size stays relevant, used to let the dashboard
+# filter "short/mid-term" (daily-or-faster) signals from "long-term"
+# (weekly-or-slower) ones.
+LONG_TERM_TIMEFRAMES = {'5d', '1wk', '1mo', '3mo'}
+
+
+def investment_horizon(timeframe: str) -> str:
+    """'long_term' for weekly-or-slower bars, 'short_mid' for daily-or-faster."""
+    return 'long_term' if timeframe in LONG_TERM_TIMEFRAMES else 'short_mid'
+
 
 def is_intraday(timeframe: str) -> bool:
     return timeframe in INTRADAY
@@ -113,6 +128,8 @@ def analyse_symbol(symbol: str, df: pl.DataFrame,
             'direction':     'BUY' if verdict else 'SELL',
             'price':         round(float(df['Close'][-1]), 2),
             'strategy':      best or 'combined',
+            'timeframe':     timeframe,
+            'horizon':       investment_horizon(timeframe),
             'roi':           metrics.get('roi', 0.0),
             'benchmark_roi': metrics.get('benchmark_roi', 0.0),
             'excess_roi':    metrics.get('excess_roi', 0.0),

@@ -1275,6 +1275,21 @@ class TestSuggestEntryPrice:
 # scanner tests
 # ---------------------------------------------------------------------------
 
+class TestInvestmentHorizon:
+    def test_weekly_and_slower_bars_are_long_term(self):
+        assert scanner.investment_horizon('1wk') == 'long_term'
+        assert scanner.investment_horizon('5d') == 'long_term'
+        assert scanner.investment_horizon('1mo') == 'long_term'
+
+    def test_daily_and_faster_bars_are_short_mid(self):
+        assert scanner.investment_horizon('1d') == 'short_mid'
+        assert scanner.investment_horizon('1h') == 'short_mid'
+        assert scanner.investment_horizon('5m') == 'short_mid'
+
+    def test_unknown_timeframe_defaults_to_short_mid(self):
+        assert scanner.investment_horizon('bogus') == 'short_mid'
+
+
 class TestScanner:
     def test_analyse_symbol_returns_none_without_signal(self, df_flat):
         with patch.object(strategy, 'what_is_signal', return_value=None):
@@ -1286,8 +1301,17 @@ class TestScanner:
         assert out['symbol'] == 'AAPL'
         assert out['direction'] == 'BUY'
         for key in ('price', 'roi', 'benchmark_roi', 'excess_roi',
-                    'win_rate', 'trades', 'strategy'):
+                    'win_rate', 'trades', 'strategy', 'timeframe', 'horizon'):
             assert key in out
+
+    def test_analyse_symbol_horizon_matches_timeframe_used(self, df_up):
+        with patch.object(strategy, 'what_is_signal', return_value=True):
+            daily = scanner.analyse_symbol('AAPL', df_up, timeframe='1d')
+            weekly = scanner.analyse_symbol('AAPL', df_up, timeframe='1wk')
+        assert daily['timeframe'] == '1d'
+        assert daily['horizon'] == 'short_mid'
+        assert weekly['timeframe'] == '1wk'
+        assert weekly['horizon'] == 'long_term'
 
     def test_analyse_symbol_makes_no_network_calls(self, df_up):
         # Price comes off the batch-downloaded frame, not a fresh quote.

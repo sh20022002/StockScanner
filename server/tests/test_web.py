@@ -10,10 +10,13 @@ Run with: pytest server/tests -v
 import base64
 import os
 import sys
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from web.app import call_performance, sector_summary
+import scanner
+from web.app import call_performance, sector_summary, _project_future_times, _should_scan_this_iteration
 from web.auth import verify_basic_auth
 
 
@@ -127,6 +130,45 @@ class TestSectorSummary:
         assert sector_summary([], self.SECTOR_MAP, '2026-08-05') == []
 
 
+class TestProjectFutureTimes:
+    def test_too_few_timestamps_returns_empty(self):
+        assert _project_future_times([datetime(2026, 1, 1)], 10) == []
+
+    def test_zero_or_negative_horizon_returns_empty(self):
+        times = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(5)]
+        assert _project_future_times(times, 0) == []
+        assert _project_future_times(times, -3) == []
+
+    def test_returns_one_timestamp_per_horizon_step(self):
+        times = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(5)]
+        out = _project_future_times(times, 7)
+        assert len(out) == 7
+
+    def test_daily_spacing_steps_by_one_day(self):
+        times = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(10)]
+        out = _project_future_times(times, 3)
+        assert out[1] - out[0] == 86400
+        assert out[2] - out[1] == 86400
+
+    def test_first_step_follows_last_known_timestamp(self):
+        times = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(10)]
+        last_ts = int(times[-1].replace(tzinfo=timezone.utc).timestamp())
+        out = _project_future_times(times, 1)
+        assert out[0] == last_ts + 86400
+
+    def test_median_gap_is_not_skewed_by_one_weekend_jump(self):
+        # 9 daily gaps + one 3-day (weekend) gap -> median stays 1 day.
+        times = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(10)]
+        times.append(times[-1] + timedelta(days=3))
+        out = _project_future_times(times, 2)
+        assert out[1] - out[0] == 86400
+
+    def test_timestamps_strictly_increasing(self):
+        times = [datetime(2026, 1, 1) + timedelta(hours=i) for i in range(20)]
+        out = _project_future_times(times, 10)
+        assert all(b > a for a, b in zip(out, out[1:]))
+
+
 def _basic_header(user, password):
     token = base64.b64encode(f'{user}:{password}'.encode()).decode()
     return f'Basic {token}'
@@ -166,3 +208,25 @@ class TestVerifyBasicAuth:
         # 'partition' on the first colon: "a:b:c" -> user="a", password="b:c".
         token = base64.b64encode(b'alice:pass:word').decode()
         assert verify_basic_auth(f'Basic {token}', 'alice', 'pass:word') is True
+
+
+class TestShouldScanThisIteration:
+    def test_forced_first_scan_ignores_market_hours(self):
+        with patch.object(scanner, 'should_scan_now', return_value=False) as mock:
+            assert _should_scan_this_iteration(force_first=True, timeframe='1h') is True
+        # Short-circuited by `or` — force_first=True must never even need to
+        # ask should_scan_now, not just happen to override its answer.
+        mock.assert_not_called()
+
+    def test_non_first_scan_respects_market_hours_open(self):
+        with patch.object(scanner, 'should_scan_now', return_value=True):
+            assert _should_scan_this_iteration(force_first=False, timeframe='1h') is True
+
+    def test_non_first_scan_respects_market_hours_closed(self):
+        with patch.object(scanner, 'should_scan_now', return_value=False):
+            assert _should_scan_this_iteration(force_first=False, timeframe='1h') is False
+
+    def test_daily_timeframe_always_scans_regardless_of_force_first(self):
+        # should_scan_now already returns True unconditionally for non-intraday
+        # timeframes — force_first shouldn't change that, just add to it.
+        assert _should_scan_this_iteration(force_first=False, timeframe='1d') is True

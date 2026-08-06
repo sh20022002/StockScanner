@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ except Exception as _rl_import_error:      # torch/RL stack is optional
 
 import polars as pl
 
+import hmm_forecast
 import scanner
 import scraping
 import signal_log
@@ -102,12 +104,14 @@ class ScannerState:
         self.last_scan_at: str | None = None
         self.last_scan_count = 0
         self.last_error: str | None = None
+        self.is_scanning     = False    # True only while a scan is actually in flight
         self.task: asyncio.Task | None = None
         self.subscribers: set[asyncio.Queue] = set()
 
     def status(self) -> dict:
         return {
             'running':          self.running,
+            'is_scanning':      self.is_scanning,
             'symbols_count':    len(self.symbols),
             'timeframe':        self.timeframe,
             'lookback':         self.lookback,
@@ -138,28 +142,54 @@ async def broadcast(event: dict):
         state.subscribers.discard(q)
 
 
+def _should_scan_this_iteration(force_first: bool, timeframe: str) -> bool:
+    """
+    force_first makes the very first scan after (re)starting run
+    unconditionally, even for an intraday timeframe with the market closed —
+    otherwise starting the scanner outside market hours shows an empty feed
+    until the market opens, which reads as broken rather than "waiting."
+    Every scan after that first one goes back to the normal
+    scanner.should_scan_now gating.
+
+    Pulled out as a pure function so it's testable without spinning up the
+    asyncio loop it drives — see server/tests/test_web.py.
+    """
+    return force_first or scanner.should_scan_now(timeframe)
+
+
 async def _scanner_loop():
     """Mirrors scanner semantics from the old Streamlit thread, as an asyncio task."""
+    force_first_scan = True
     while state.running:
         try:
-            if scanner.should_scan_now(state.timeframe):
-                want_data = rl_live is not None
-                result = await asyncio.to_thread(
-                    scanner.scan, state.symbols,
-                    timeframe=state.timeframe, lookback=state.lookback,
-                    min_margin=state.min_margin, quiet=True, return_data=want_data,
-                )
-                if want_data:
-                    found, stock_data = result
-                    found = await asyncio.to_thread(rl_live.annotate, found, stock_data)
-                else:
-                    found = result
-                fresh = signal_log.add_signals(found)
-                state.last_scan_at = datetime.now(timezone.utc).isoformat()
-                state.last_scan_count = len(found)
-                state.last_error = None
-                for entry in fresh:
-                    await broadcast({'type': 'signal', 'data': json_ok(entry)})
+            if _should_scan_this_iteration(force_first_scan, state.timeframe):
+                # is_scanning is its own broadcast, separate from the one after
+                # the scan completes below, so a slow scan (batch download +
+                # 12 strategies x however many symbols) shows as "in progress"
+                # for its actual duration instead of only flipping on and off
+                # around a single status push.
+                state.is_scanning = True
+                await broadcast({'type': 'status', 'data': json_ok(state.status())})
+                try:
+                    want_data = rl_live is not None
+                    result = await asyncio.to_thread(
+                        scanner.scan, state.symbols,
+                        timeframe=state.timeframe, lookback=state.lookback,
+                        min_margin=state.min_margin, quiet=True, return_data=want_data,
+                    )
+                    if want_data:
+                        found, stock_data = result
+                        found = await asyncio.to_thread(rl_live.annotate, found, stock_data)
+                    else:
+                        found = result
+                    fresh = signal_log.add_signals(found)
+                    state.last_scan_at = datetime.now(timezone.utc).isoformat()
+                    state.last_scan_count = len(found)
+                    state.last_error = None
+                    for entry in fresh:
+                        await broadcast({'type': 'signal', 'data': json_ok(entry)})
+                finally:
+                    state.is_scanning = False
                 await broadcast({'type': 'status', 'data': json_ok(state.status())})
                 wait = scanner.scan_interval_seconds(state.timeframe)
             else:
@@ -170,6 +200,8 @@ async def _scanner_loop():
             state.last_error = str(e)
             await broadcast({'type': 'status', 'data': json_ok(state.status())})
             wait = scanner.scan_interval_seconds(state.timeframe)
+        finally:
+            force_first_scan = False
 
         for _ in range(wait):
             if not state.running:
@@ -255,6 +287,10 @@ async def start_scanner(body: dict):
 @app.post('/api/scanner/stop')
 async def stop_scanner():
     state.running = False
+    # Cancelling state.task while it's mid-scan races the loop's own finally
+    # block that clears this — set it directly so the broadcast below can't
+    # report a stale "still scanning" the instant after Stop was clicked.
+    state.is_scanning = False
     if state.task:
         state.task.cancel()
         state.task = None
@@ -268,13 +304,21 @@ async def stop_scanner():
 
 @app.get('/api/signals')
 def get_signals(direction: str | None = None, symbol: str | None = None,
+                horizon: str | None = None,
                 limit: int = Query(200, ge=1, le=500)):
+    """
+    horizon: 'long_term' or 'short_mid' (see scanner.investment_horizon).
+    Signals logged before this field existed have no 'horizon' key and are
+    excluded by either specific filter — only 'All' (the default) shows them.
+    """
     signals = signal_log.load_signals()
     if direction and direction != 'All':
         signals = [s for s in signals if s.get('direction') == direction]
     if symbol:
         needle = symbol.upper()
         signals = [s for s in signals if needle in s.get('symbol', '')]
+    if horizon and horizon != 'All':
+        signals = [s for s in signals if s.get('horizon') == horizon]
     return json_ok(signals[:limit])
 
 
@@ -550,6 +594,67 @@ async def get_symbol_entry_price(symbol: str,
         raise HTTPException(404, f'Not enough recent hourly history for {symbol}')
 
     return json_ok({'symbol': symbol, 'direction': direction, **suggestion})
+
+
+def _project_future_times(times: list[datetime], horizon: int) -> list[int]:
+    """
+    `horizon` future bar timestamps (UTC epoch seconds) continuing past the
+    last one in `times`, spaced by the median gap between the last ~10 bars.
+
+    A median over a handful of samples rather than a fixed "+1 day" lets
+    trading-day gaps (weekends, holidays) average out approximately instead
+    of being modelled exactly — good enough for where a projected line lands
+    on the chart, not a claim about which future dates are trading days.
+
+    Pulled out as a pure function so it's testable without a network call —
+    see server/tests/test_web.py.
+    """
+    if len(times) < 2 or horizon < 1:
+        return []
+    recent = times[-11:]
+    deltas = [(recent[i] - recent[i - 1]).total_seconds() for i in range(1, len(recent))]
+    step_seconds = statistics.median(deltas) if deltas else 86400.0
+    last_ts = int(times[-1].replace(tzinfo=timezone.utc).timestamp())
+    return [int(last_ts + step * step_seconds) for step in range(1, horizon + 1)]
+
+
+@app.get('/api/symbol/{symbol}/hmm-projection')
+async def get_symbol_hmm_projection(symbol: str, interval: str = '1d', period: str = '2y',
+                                    horizon: int = Query(20, ge=1, le=120)):
+    """
+    Inline Gaussian-HMM regime detection + forward price projection
+    (server/hmm_forecast.py) — fit fresh on request against whatever the
+    chart is currently showing, not the legacy MongoDB-backed
+    server/prediction.py (which needs a persisted, periodically-refit model
+    this app has no database for).
+
+    Soft-fails ('available': False) rather than raising when hmmlearn isn't
+    installed or there's too little history to fit anything meaningful —
+    this is an optional overlay, not something that should be able to break
+    the rest of the symbol page the way a chart-data failure would.
+    """
+    symbol = scraping.yahoo_symbol(symbol)
+
+    def _fetch():
+        return scraping.get_stock_data(
+            symbol, interval=interval, period=period,
+            return_flags={'DF': True, 'INDICATORS': False})
+
+    data = await asyncio.to_thread(_fetch)
+    df = data.get('DF')
+    if df is None or df.empty or len(df) < 2:
+        return json_ok({'symbol': symbol, 'available': False})
+
+    result = await asyncio.to_thread(
+        hmm_forecast.fit_and_project, df['Close'].to_numpy(), horizon)
+    if result is None:
+        return json_ok({'symbol': symbol, 'available': False})
+
+    future_times = _project_future_times(list(df.index.to_pydatetime()), horizon)
+    for point, ts in zip(result['projection'], future_times):
+        point['time'] = ts
+
+    return json_ok({'symbol': symbol, 'available': True, **result})
 
 
 @app.get('/api/symbol/{symbol}/news')

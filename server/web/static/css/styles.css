@@ -1,25 +1,35 @@
 :root {
-  --bg:        #0a0c14;
-  --bg-panel:  #11141f;
-  --bg-inset:  #0d0f19;
-  --border:    #232838;
-  --text:      #e8eaf0;
-  --text-dim:  #8a90a6;
-  --text-mute: #565c72;
+  /* Near-true-black ramp — matches the SmarTraid mark's black canvas, with
+     enough separation between bg/panel/inset that panels still read as
+     layered surfaces rather than flattening into the background. */
+  --bg:        #050608;
+  --bg-panel:  #0d1016;
+  --bg-inset:  #090b10;
+  --border:    #1c212f;
+  --text:      #eef0f5;
+  --text-dim:  #8b92a8;
+  --text-mute: #565d72;
   --green:     #00d97e;
   --red:       #ff4d6a;
   --amber:     #ffb454;
   --blue:      #4d9dff;
   --mono: 'SFMono-Regular', 'JetBrains Mono', Consolas, 'Liberation Mono', monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --radius: 10px;
+  --radius: 12px;
+  --shadow-panel: 0 6px 20px rgba(0, 0, 0, 0.32);
 }
 
 * { box-sizing: border-box; }
 
 html, body {
   margin: 0;
-  background: var(--bg);
+  /* A faint brand-green glow in the top-left corner — subtle enough not to
+     touch legibility of anything laid over it, echoes the mark's palette
+     without needing the mark itself as a background image. */
+  background:
+    radial-gradient(ellipse 900px 480px at 12% -12%, color-mix(in srgb, var(--green) 6%, transparent), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--sans);
   font-size: 14px;
@@ -33,7 +43,9 @@ html, body {
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
-  background: var(--bg-panel);
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -42,10 +54,21 @@ html, body {
   gap: 10px;
 }
 
-.brand { display: flex; align-items: baseline; gap: 8px; }
-.brand-icon { font-size: 1.1em; }
-.brand-name { font-weight: 700; font-size: 1.1em; letter-spacing: 0.02em; }
-.brand-sub { color: var(--text-dim); font-size: 0.85em; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-icon { display: flex; flex-shrink: 0; }
+.brand-text { display: flex; flex-direction: column; gap: 1px; line-height: 1.2; }
+.brand-name { font-weight: 800; font-size: 1.22em; letter-spacing: 0.01em; }
+.brand-name .accent { color: var(--green); }
+.brand-sub { color: var(--text-dim); font-size: 0.72em; letter-spacing: 0.05em; text-transform: uppercase; }
+.brand-badge {
+  font-size: 0.68em; font-weight: 700; letter-spacing: 0.05em;
+  padding: 3px 9px; border-radius: 999px;
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 40%, var(--border));
+  text-transform: uppercase;
+  white-space: nowrap;
+}
 
 .status-cluster { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -72,7 +95,62 @@ html, body {
 .pill[data-state="active"] .dot { background: var(--blue); }
 .pill[data-state="unavailable"] .dot { background: var(--text-mute); }
 
+/* A visibly different, faster/brighter pulse from plain "running" — the pill
+   alone used to be the only cue a scan was actually in flight right now. */
+.pill[data-state="scanning"] {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 55%, var(--border));
+  background: color-mix(in srgb, var(--blue) 14%, var(--bg-inset));
+}
+.pill[data-state="scanning"] .dot {
+  background: var(--blue); box-shadow: 0 0 8px var(--blue);
+  animation: pulse 0.7s infinite;
+}
+
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ── Scanning banner ────────────────────────────────────────────────────
+   Full-width, hard to miss — the pill pulsing a bit faster wasn't enough on
+   its own; this is meant to be seen without staring at the top bar. */
+.scanning-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 20px;
+  font-size: 0.85em; font-weight: 600;
+  color: #eef6ff;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--blue) 55%, var(--bg)),
+    color-mix(in srgb, var(--green) 45%, var(--bg)),
+    color-mix(in srgb, var(--blue) 55%, var(--bg)));
+  background-size: 200% 100%;
+  animation: scan-shimmer 2.2s linear infinite;
+  border-bottom: 1px solid color-mix(in srgb, var(--blue) 40%, var(--border));
+}
+.scanning-banner-spinner {
+  width: 13px; height: 13px; flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes scan-shimmer { from { background-position: 0% 0; } to { background-position: -200% 0; } }
+
+.btn-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.05em;
+  line-height: 1;
+  cursor: pointer;
+  transition: filter 0.12s, color 0.12s;
+}
+.btn-icon:hover:not(:disabled) { filter: brightness(1.3); color: var(--text); }
+.btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-icon.spinning { animation: spin 0.7s linear infinite; color: var(--blue); }
+
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* ── Layout grid ────────────────────────────────────────────────────── */
 
@@ -111,19 +189,39 @@ html, body {
 /* ── Panels ─────────────────────────────────────────────────────────── */
 
 .panel {
+  position: relative;
+  overflow: hidden;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   min-width: 0;
+  box-shadow: var(--shadow-panel);
 }
+
+/* A thin colored accent per section — mostly monochrome dashboard otherwise,
+   this is the "little bit of color" that makes each panel identifiable at a
+   glance instead of every card reading as the same gray box. */
+.panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--accent, var(--border));
+}
+.sector-stats-panel { --accent: linear-gradient(90deg, var(--green), var(--amber)); }
+.control-rail        { --accent: var(--blue); }
+.feed-panel           { --accent: linear-gradient(90deg, var(--green), var(--red)); }
+.chart-panel          { --accent: linear-gradient(90deg, var(--blue), var(--green)); }
+.dist-panel           { --accent: linear-gradient(90deg, var(--amber), var(--blue)); }
+.history-panel        { --accent: linear-gradient(90deg, var(--blue), var(--amber)); }
 
 .panel-title {
   font-size: 0.95em;
-  font-weight: 600;
+  font-weight: 700;
   margin: 0 0 12px;
   color: var(--text);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
 }
 
 .panel-head {
@@ -190,6 +288,14 @@ html, body {
 
 .hint { font-size: 0.78em; color: var(--text-mute); margin: 6px 0 0; }
 .error { font-size: 0.78em; color: var(--red); margin: 6px 0 0; }
+.hint-pending {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-weight: 600;
+}
 
 /* ── Modern toggle switch ──────────────────────────────────────────────
    Reusable switch component (currently the scanner's Start/Stop control,
@@ -242,6 +348,15 @@ html, body {
 .sector-card {
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sector-card.upside {
+  background: color-mix(in srgb, var(--green) 13%, var(--bg-inset));
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+}
+.sector-card.downside {
+  background: color-mix(in srgb, var(--red) 13%, var(--bg-inset));
+  border-color: color-mix(in srgb, var(--red) 38%, var(--border));
 }
 .sector-card-name {
   font-weight: 600; font-size: 0.85em; margin-bottom: 6px;
@@ -261,6 +376,7 @@ html, body {
   border-radius: var(--radius);
   padding: 12px 14px;
   text-align: center;
+  box-shadow: var(--shadow-panel);
 }
 .tile-label { font-size: 0.72em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 .tile-value { font-family: var(--mono); font-size: 1.4em; font-weight: 700; margin-top: 4px; }
@@ -306,12 +422,18 @@ html, body {
 
 /* ── Chart panel ────────────────────────────────────────────────────── */
 
-.chart-controls { display: flex; gap: 8px; flex-wrap: wrap; }
-.chart-controls input, .chart-controls select {
+.chart-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.chart-controls input[type="text"], .chart-controls select {
   background: var(--bg-inset); border: 1px solid var(--border);
   border-radius: 6px; color: var(--text); padding: 6px 9px; font-size: 0.85em;
 }
-.chart-controls input { width: 150px; }
+.chart-controls input[type="text"] { width: 150px; }
+
+.chk-field {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.82em; color: var(--text-dim); cursor: pointer; white-space: nowrap;
+}
+.chk-field input[type="checkbox"] { accent-color: var(--blue); cursor: pointer; }
 
 .verdict-banner {
   margin: 10px 0; padding: 8px 12px; border-radius: 7px;
@@ -326,6 +448,16 @@ html, body {
   font-size: 0.8em; border: 1px solid var(--border); color: var(--text-dim);
 }
 .entry-price-banner strong { color: var(--text); font-family: var(--mono); font-weight: 600; }
+
+.hmm-banner {
+  margin: 0 0 10px; padding: 7px 12px; border-radius: 7px;
+  font-size: 0.8em; border: 1px solid var(--border); color: var(--text-dim);
+}
+.hmm-banner strong { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.hmm-state { font-weight: 700; }
+.hmm-state.positive { color: var(--green); }
+.hmm-state.negative { color: var(--red); }
+.hmm-state.neutral  { color: var(--amber); }
 
 .chart-container { height: 380px; margin-top: 4px; position: relative; }
 .chart-placeholder {

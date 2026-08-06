@@ -7,12 +7,15 @@
 const state = {
   signals: [],
   filterDirection: 'All',
+  filterHorizon: 'All',   // 'All' | 'short_mid' | 'long_term' — see scanner.investment_horizon
   filterSymbol: '',
   sortBy: 'time',   // 'time' (newest first, server order) or 'confidence'
   status: null,
   nextScanAt: null,   // epoch ms — set by applyStatus(), ticked down by tickNextScan()
   scanBusy: false,    // true while a start/stop request is in flight — blocks double-clicks
 };
+
+const HORIZON_LABELS = { long_term: 'Long-term', short_mid: 'Short/Mid-term' };
 
 const $ = (id) => document.getElementById(id);
 
@@ -44,6 +47,7 @@ function tickNextScan() {
   const el = $('m-next');
   const status = state.status;
   if (!status || !status.running) { el.textContent = '—'; return; }
+  if (status.is_scanning) { el.textContent = 'scanning…'; return; }   // real flag beats the countdown guess
   if (!status.market_open) { el.textContent = 'mkt closed'; return; }
   if (state.nextScanAt == null) { el.textContent = 'starting…'; return; }
   const remaining = state.nextScanAt - Date.now();
@@ -51,13 +55,24 @@ function tickNextScan() {
 }
 
 function applyStatus(status) {
+  // Stopped (by this tab or another) while a config-change restart was
+  // pending — nothing left to restart, and forcing one back on would
+  // surprise whoever just stopped it.
+  if (!status.running) cancelPendingRestart();
   state.status = status;
 
   const scanPill = $('scan-pill');
-  scanPill.dataset.state = status.running ? 'running' : 'stopped';
-  $('scan-label').textContent = status.running
-    ? `scanning ${status.symbols_count} symbols (${status.timeframe})`
-    : 'scanner stopped';
+  scanPill.dataset.state = status.is_scanning ? 'scanning' : status.running ? 'running' : 'stopped';
+  $('scan-label').textContent = status.is_scanning
+    ? `scanning ${status.symbols_count} symbols now…`
+    : status.running
+      ? `watching ${status.symbols_count} symbols (${status.timeframe})`
+      : 'scanner stopped';
+
+  // Hard-to-miss banner, not just the topbar dot — visible the whole time a
+  // scan is actually running (a full pass over the universe can take a
+  // while), not just a blip around the status push.
+  $('scanning-banner').hidden = !status.is_scanning;
 
   const marketPill = $('market-pill');
   marketPill.dataset.state = status.market_open ? 'open' : 'closed';
@@ -128,7 +143,10 @@ function renderSectorStats(data) {
 
   for (const r of rows) {
     const card = document.createElement('div');
-    card.className = 'sector-card';
+    // Upside/downside tint follows avg_excess — the same number the text
+    // below is colored by, just applied to the whole card for a fast scan.
+    const tone = r.avg_excess > 0 ? 'upside' : r.avg_excess < 0 ? 'downside' : '';
+    card.className = ('sector-card ' + tone).trim();
 
     const name = document.createElement('div');
     name.className = 'sector-card-name';
@@ -170,6 +188,9 @@ async function refreshSectorStats() {
 
 function feedRowMatches(sig) {
   if (state.filterDirection !== 'All' && sig.direction !== state.filterDirection) return false;
+  // Signals logged before the horizon field existed have no sig.horizon —
+  // they only show up under 'All', same rule the API filter uses.
+  if (state.filterHorizon !== 'All' && sig.horizon !== state.filterHorizon) return false;
   if (state.filterSymbol && !sig.symbol.toUpperCase().includes(state.filterSymbol)) return false;
   return true;
 }
@@ -212,6 +233,13 @@ function buildFeedItem(sig) {
   strat.className = 'feed-strategy';
   strat.textContent = sig.strategy || '';
   right.append(price, excess, strat);
+
+  if (sig.horizon) {
+    const horizon = document.createElement('span');
+    horizon.className = 'feed-strategy';
+    horizon.textContent = ` · ${HORIZON_LABELS[sig.horizon] || sig.horizon}`;
+    right.append(horizon);
+  }
 
   if (sig.rl_action) {
     const rl = document.createElement('span');
@@ -259,6 +287,26 @@ async function loadSignalsFromServer() {
   } catch (e) { console.error(e); }
 }
 
+// Manual "pull everything now" — status, signals, summary and sector stats
+// all update on their own via SSE/polling already, but a visible refresh
+// gives you a way to force it (e.g. right after reconnecting) instead of
+// waiting for the next push.
+async function refreshAll() {
+  const btn = $('refresh-btn');
+  if (btn.disabled) return;
+  btn.classList.add('spinning');
+  btn.disabled = true;
+  try {
+    await Promise.all([
+      (async () => { try { applyStatus(await Api.status()); } catch (_) {} })(),
+      loadSignalsFromServer(),   // also refreshes summary + sector stats
+    ]);
+  } finally {
+    btn.classList.remove('spinning');
+    btn.disabled = false;
+  }
+}
+
 /* ── History table ────────────────────────────────────────────────────── */
 
 function renderHistory() {
@@ -275,6 +323,7 @@ function renderHistory() {
       fmtPct(s.roi), fmtPct(s.benchmark_roi), fmtPct(s.excess_roi),
       s.win_rate != null ? `${fmtNum(s.win_rate, 1)}%` : '—',
       s.trades ?? '—', s.strategy || '',
+      s.horizon ? (HORIZON_LABELS[s.horizon] || s.horizon) : '—',
       s.rl_confidence != null ? `${Math.round(s.rl_confidence * 100)}%` : '—',
     ];
     cells.forEach((val, i) => {
@@ -291,7 +340,7 @@ function renderHistory() {
 function exportCsv() {
   const rows = sortSignals(state.signals.filter(feedRowMatches));
   const header = ['time', 'symbol', 'direction', 'price', 'roi', 'benchmark_roi',
-                  'excess_roi', 'win_rate', 'trades', 'strategy', 'rl_confidence'];
+                  'excess_roi', 'win_rate', 'trades', 'strategy', 'horizon', 'rl_confidence'];
   const lines = [header.join(',')];
   for (const s of rows) {
     lines.push(header.map(k => JSON.stringify(s[k] ?? '')).join(','));
@@ -310,11 +359,17 @@ async function loadSymbol(symbol) {
   $('symbol-input').value = symbol;
   const interval = $('chart-interval').value;
   const period = $('chart-period').value;
+  const showBounds = $('show-bounds-toggle').checked;
+  const showHmm = $('show-hmm-toggle').checked;
+  const overlays = 'SMA20,SMA50,SMA150';
   let data;
 
   try {
-    data = await Api.symbol(symbol, { interval, period, overlays: 'SMA20,SMA50,SMA150' });
+    data = await Api.symbol(symbol, { interval, period, overlays });
     Charts.renderCandles(data);
+    // Peaks/Troughs are computed client-side from the same candles, not a
+    // server-supplied overlay column — see Charts.renderBounds.
+    if (showBounds) Charts.renderBounds(data.candles); else Charts.clearBounds();
 
     const banner = $('verdict-banner');
     banner.hidden = false;
@@ -332,6 +387,7 @@ async function loadSymbol(symbol) {
     renderStrategyTable(data.strategies, data.best_strategy);
     renderCompanyInfo(data.meta);
     if (data.verdict !== 'BUY' && data.verdict !== 'SELL') renderEntryPrice(null);
+    if (!showHmm) { Charts.clearHmmProjection(); renderHmmBanner(null); }
   } catch (e) {
     alert(`Failed to load ${symbol}: ${e.message}`);
     return;
@@ -366,7 +422,46 @@ async function loadSymbol(symbol) {
         renderEntryPrice(null);
       }
     })(),
+    (async () => {
+      if (!showHmm) return;
+      try {
+        const projection = await Api.symbolHmmProjection(symbol, { interval, period });
+        Charts.renderHmmProjection(projection);
+        renderHmmBanner(projection);
+      } catch (e) {
+        console.error('hmm projection load failed', e);
+        Charts.clearHmmProjection();
+        renderHmmBanner(null);
+      }
+    })(),
   ]);
+}
+
+const HMM_STATE_LABELS = { positive: 'Positive', neutral: 'Neutral', negative: 'Negative' };
+
+function renderHmmBanner(projection) {
+  const el = $('hmm-banner');
+  if (!projection) { el.hidden = true; return; }
+  if (!projection.available) {
+    el.hidden = false;
+    el.textContent = 'HMM projection unavailable — not enough history to fit a regime model for this symbol/window.';
+    return;
+  }
+
+  const state = projection.current_state;
+  const prob = Math.round((projection.state_probs[state] || 0) * 100);
+  const stateEl = document.createElement('span');
+  stateEl.className = `hmm-state ${state}`;
+  stateEl.textContent = HMM_STATE_LABELS[state] || state;
+
+  el.textContent = '';
+  el.append(
+    'Inline HMM regime: ', stateEl, ` (${prob}% confidence) · projected `,
+  );
+  const strong = document.createElement('strong');
+  strong.textContent = `${projection.projection.length} bars forward`;
+  el.append(strong, ' — expected value under the fitted regime, not a price prediction.');
+  el.hidden = false;
 }
 
 function renderEntryPrice(suggestion) {
@@ -645,36 +740,114 @@ function applyMarketCap(capB) {
     chip.classList.toggle('active', Number(chip.dataset.cap) === capB);
   }
   refreshUniverseCount();
+  scheduleConfigRestart();
+}
+
+// {exchange, sector, min_market_cap, timeframe, lookback, min_margin} — the
+// full body /api/scanner/start expects, read fresh off the controls.
+function buildScanConfigBody() {
+  return {
+    ...currentUniverseParams(),
+    timeframe:  $('timeframe-select').value,
+    lookback:   Number($('lookback-range').value),
+    min_margin: Number($('margin-range').value),
+  };
+}
+
+async function startScannerNow() {
+  $('scan-error').hidden = true;
+  applyStatus(await Api.startScanner(buildScanConfigBody()));
+}
+
+async function stopScannerNow() {
+  applyStatus(await Api.stopScanner());
+}
+
+/* ── Debounced "apply changed settings" restart ──────────────────────────
+   Changing a control while the scanner is already running doesn't take
+   effect until you'd normally stop and start it again by hand. Instead:
+   wait 10s of no further changes (so adjusting three sliders in a row
+   doesn't restart the scan three times), then stop/start automatically with
+   whatever the controls say at that moment. A no-op while stopped — there's
+   nothing running to restart, so the new settings just apply on next Start
+   like before. */
+let restartTimeout = null;
+let restartCountdownInterval = null;
+let restartDeadline = null;
+
+function cancelPendingRestart() {
+  if (restartTimeout) { clearTimeout(restartTimeout); restartTimeout = null; }
+  if (restartCountdownInterval) { clearInterval(restartCountdownInterval); restartCountdownInterval = null; }
+  restartDeadline = null;
+  $('restart-pending-hint').hidden = true;
+}
+
+function scheduleConfigRestart() {
+  if (!state.status || !state.status.running) return;
+  cancelPendingRestart();
+
+  restartDeadline = Date.now() + 10000;
+  const hint = $('restart-pending-hint');
+  hint.hidden = false;
+
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((restartDeadline - Date.now()) / 1000));
+    hint.textContent = `Settings changed — restarting scan in ${remaining}s…`;
+  };
+  tick();
+  restartCountdownInterval = setInterval(tick, 250);
+
+  restartTimeout = setTimeout(async () => {
+    cancelPendingRestart();
+    if (state.scanBusy) return;   // a manual toggle raced this — let it win
+    // Stopped by this tab or another one while the timer was pending — don't
+    // force a scan back on; the whole point was to apply new settings to an
+    // already-running scan, not to start one that got stopped meanwhile.
+    if (!state.status || !state.status.running) return;
+    state.scanBusy = true;
+    $('scan-toggle').disabled = true;
+    try {
+      await stopScannerNow();
+      await startScannerNow();
+    } catch (e) {
+      $('scan-error').hidden = false;
+      $('scan-error').textContent = `Error: ${e.message}`;
+    } finally {
+      state.scanBusy = false;
+      $('scan-toggle').disabled = false;
+    }
+  }, 10000);
 }
 
 function wireControls() {
-  $('lookback-range').addEventListener('input', (e) => $('lookback-val').textContent = e.target.value);
-  $('margin-range').addEventListener('input', (e) => $('margin-val').textContent = e.target.value);
+  $('lookback-range').addEventListener('input', (e) => {
+    $('lookback-val').textContent = e.target.value;
+    scheduleConfigRestart();
+  });
+  $('margin-range').addEventListener('input', (e) => {
+    $('margin-val').textContent = e.target.value;
+    scheduleConfigRestart();
+  });
 
   $('market-cap-range').addEventListener('input', (e) => applyMarketCap(Number(e.target.value)));
   for (const chip of document.querySelectorAll('.cap-chip')) {
     chip.addEventListener('click', () => applyMarketCap(Number(chip.dataset.cap)));
   }
 
-  $('exchange-select').addEventListener('change', () => refreshUniverseCount());
-  $('sector-select').addEventListener('change', () => refreshUniverseCount());
+  $('exchange-select').addEventListener('change', () => { refreshUniverseCount(); scheduleConfigRestart(); });
+  $('sector-select').addEventListener('change', () => { refreshUniverseCount(); scheduleConfigRestart(); });
+  $('timeframe-select').addEventListener('change', () => scheduleConfigRestart());
 
   $('scan-toggle').addEventListener('click', async () => {
     if (state.scanBusy) return;
+    cancelPendingRestart();   // a manual toggle overrides any pending auto-restart
     state.scanBusy = true;
     $('scan-toggle').disabled = true;
     try {
       if (state.status && state.status.running) {
-        applyStatus(await Api.stopScanner());
+        await stopScannerNow();
       } else {
-        const body = {
-          ...currentUniverseParams(),
-          timeframe:  $('timeframe-select').value,
-          lookback:   Number($('lookback-range').value),
-          min_margin: Number($('margin-range').value),
-        };
-        $('scan-error').hidden = true;
-        applyStatus(await Api.startScanner(body));
+        await startScannerNow();
       }
     } catch (e) {
       $('scan-error').hidden = false;
@@ -699,6 +872,11 @@ function wireControls() {
     renderFeed();
     renderHistory();
   });
+  $('feed-horizon').addEventListener('change', (e) => {
+    state.filterHorizon = e.target.value;
+    renderFeed();
+    renderHistory();
+  });
   $('feed-symbol').addEventListener('input', (e) => {
     state.filterSymbol = e.target.value.toUpperCase();
     renderFeed();
@@ -719,6 +897,7 @@ function wireControls() {
   });
 
   $('export-btn').addEventListener('click', exportCsv);
+  $('refresh-btn').addEventListener('click', refreshAll);
 }
 
 async function loadUniverse() {

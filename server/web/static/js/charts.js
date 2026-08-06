@@ -7,6 +7,7 @@ const Charts = (() => {
   let volumeSeries = null;
   const overlaySeries = {};
   const overlayColors = ['#4d9dff', '#ffb454', '#c792ea', '#7ee8fa', '#ff8ba7'];
+  let hmmSeries = { mean: null, upper: null, lower: null };
 
   // The backtest-derived markers (renderCandles) and the real historical
   // signal markers (setHistoricalMarkers) are set by two separate async calls
@@ -66,6 +67,8 @@ const Charts = (() => {
 
     Object.values(overlaySeries).forEach(s => chart.removeSeries(s));
     for (const key in overlaySeries) delete overlaySeries[key];
+    clearHmmProjection();   // last symbol's projection must not bleed onto new candles
+    clearBounds();          // ditto for the peaks/troughs trendlines
 
     let i = 0;
     for (const [name, points] of Object.entries(payload.overlays || {})) {
@@ -82,6 +85,109 @@ const Charts = (() => {
     historicalMarkers = [];   // reset until the caller loads them for this symbol
     applyMarkers();
     chart.timeScale().fitContent();
+  }
+
+  /* ── HMM regime projection (optional overlay) ─────────────────────────
+     A fresh-fit-per-request, forward-looking line + uncertainty band —
+     distinct from the historical overlays above (SMA), so it's tracked and
+     cleared separately rather than going through overlaySeries. Bright,
+     thick and solid on purpose: this used to blend into the SMA overlay
+     color rotation, which defeats the point of a forecast being visually
+     unmissable against actual price action. */
+  function clearHmmProjection() {
+    if (chart) Object.values(hmmSeries).forEach(s => s && chart.removeSeries(s));
+    hmmSeries = { mean: null, upper: null, lower: null };
+  }
+
+  function renderHmmProjection(payload) {
+    if (!chart) return;
+    clearHmmProjection();
+    if (!payload || !payload.available || !(payload.projection || []).length) return;
+
+    const points = payload.projection;
+    hmmSeries.mean = chart.addLineSeries({
+      color: '#ff2ec4', lineWidth: 3, lineStyle: LightweightCharts.LineStyle.Solid,
+      priceLineVisible: false, lastValueVisible: false, title: 'HMM projection',
+    });
+    hmmSeries.mean.setData(points.map(p => ({ time: p.time, value: p.price })));
+
+    const bandOpts = {
+      color: 'rgba(255,46,196,0.55)', lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false, lastValueVisible: false,
+    };
+    hmmSeries.upper = chart.addLineSeries(bandOpts);
+    hmmSeries.upper.setData(points.map(p => ({ time: p.time, value: p.upper })));
+    hmmSeries.lower = chart.addLineSeries(bandOpts);
+    hmmSeries.lower.setData(points.map(p => ({ time: p.time, value: p.lower })));
+  }
+
+  /* ── Peaks & Troughs (optional overlay) ────────────────────────────────
+     Two straight trendlines computed client-side from the loaded candles —
+     not a rolling envelope. Both anchor to "the bottom candle" (the lowest
+     Open in the loaded window): the Troughs line runs from its Open through
+     the last confirming swing-low Open after it; the Peaks line from its
+     High through the last confirming swing-high High after it. A swing
+     point is the standard 3-candle fractal — more extreme than the candle
+     immediately before and after it. Either line needs the bottom candle
+     plus at least 2 confirming swing points after it (3 candles' worth of
+     evidence) or it isn't drawn at all — two arbitrary points aren't a
+     trend, and a misleading line is worse than no line. */
+  let boundsSeries = { peaks: null, troughs: null };
+
+  function clearBounds() {
+    if (chart) Object.values(boundsSeries).forEach(s => s && chart.removeSeries(s));
+    boundsSeries = { peaks: null, troughs: null };
+  }
+
+  function findSwingIndices(candles, valueOf, isMoreExtreme) {
+    const swings = [];
+    for (let i = 1; i < candles.length - 1; i++) {
+      const v = valueOf(candles[i]);
+      if (isMoreExtreme(v, valueOf(candles[i - 1])) && isMoreExtreme(v, valueOf(candles[i + 1]))) {
+        swings.push(i);
+      }
+    }
+    return swings;
+  }
+
+  function renderBounds(candles) {
+    clearBounds();
+    if (!chart || !candles || candles.length < 3) return;
+
+    let bottomIdx = 0;
+    for (let i = 1; i < candles.length; i++) {
+      if (candles[i].open < candles[bottomIdx].open) bottomIdx = i;
+    }
+
+    const troughSwings = findSwingIndices(candles, c => c.open, (a, b) => a < b)
+      .filter(i => i > bottomIdx);
+    const peakSwings = findSwingIndices(candles, c => c.high, (a, b) => a > b)
+      .filter(i => i > bottomIdx);
+
+    if (troughSwings.length >= 2) {
+      const lastIdx = troughSwings[troughSwings.length - 1];
+      boundsSeries.troughs = chart.addLineSeries({
+        color: '#3ddc84', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+        priceLineVisible: false, lastValueVisible: false, title: 'Troughs',
+      });
+      boundsSeries.troughs.setData([
+        { time: candles[bottomIdx].time, value: candles[bottomIdx].open },
+        { time: candles[lastIdx].time,   value: candles[lastIdx].open },
+      ]);
+    }
+
+    if (peakSwings.length >= 2) {
+      const lastIdx = peakSwings[peakSwings.length - 1];
+      boundsSeries.peaks = chart.addLineSeries({
+        color: '#ff6b81', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+        priceLineVisible: false, lastValueVisible: false, title: 'Peaks',
+      });
+      boundsSeries.peaks.setData([
+        { time: candles[bottomIdx].time, value: candles[bottomIdx].high },
+        { time: candles[lastIdx].time,   value: candles[lastIdx].high },
+      ]);
+    }
   }
 
   /* Real past signals (server/signal_log), distinct from the backtest-derived
@@ -278,5 +384,8 @@ const Charts = (() => {
     ctx.fillText('newest', w - padR, h - 4);
   }
 
-  return { renderCandles, setHistoricalMarkers, renderDonut, renderHistogram, renderSignalPerformance };
+  return {
+    renderCandles, setHistoricalMarkers, renderDonut, renderHistogram, renderSignalPerformance,
+    renderHmmProjection, clearHmmProjection, renderBounds, clearBounds,
+  };
 })();

@@ -4,16 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SmarTraid — Monitor Station</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2213%22 font-size=%2214%22>📡</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%229%22 fill=%22%23050608%22/><rect x=%226%22 y=%2212%22 width=%225%22 height=%228%22 rx=%221.5%22 fill=%22%2300d97e%22/><rect x=%2213.5%22 y=%228%22 width=%225%22 height=%2216%22 rx=%221.5%22 fill=%22%23ff4d6a%22/><rect x=%2221%22 y=%2214%22 width=%225%22 height=%226%22 rx=%221.5%22 fill=%22%2300d97e%22/></svg>">
 <link rel="stylesheet" href="/static/css/styles.css">
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-icon">📡</span>
-    <span class="brand-name">SmarTraid</span>
-    <span class="brand-sub">Monitor Station</span>
+    <!-- Candlestick "chip" mark — a compact original reinterpretation of the
+         brand (market data + AI), not a reproduction of any source artwork. -->
+    <svg class="brand-icon" width="34" height="34" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <rect x="1" y="1" width="30" height="30" rx="9" stroke="url(#brandRing)" stroke-width="1.6"/>
+      <line x1="9" y1="8" x2="9" y2="24" stroke="#00d97e" stroke-width="1.3" stroke-linecap="round"/>
+      <rect x="6.5" y="12" width="5" height="8" rx="1.4" fill="#00d97e"/>
+      <line x1="16" y1="5" x2="16" y2="27" stroke="#ff4d6a" stroke-width="1.3" stroke-linecap="round"/>
+      <rect x="13.5" y="9" width="5" height="14" rx="1.4" fill="#ff4d6a"/>
+      <line x1="23" y1="9" x2="23" y2="21" stroke="#00d97e" stroke-width="1.3" stroke-linecap="round"/>
+      <rect x="20.5" y="13" width="5" height="6" rx="1.4" fill="#00d97e"/>
+      <defs>
+        <linearGradient id="brandRing" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#00d97e"/>
+          <stop offset="1" stop-color="#4d9dff"/>
+        </linearGradient>
+      </defs>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">Smar<span class="accent">T</span>raid</span>
+      <span class="brand-sub">Monitor Station</span>
+    </div>
+    <span class="brand-badge" title="RL is always blended into every scan — see the RL pill">AI Native</span>
   </div>
 
   <div class="status-cluster">
@@ -23,8 +42,14 @@
     <div class="pill pill-muted" id="rl-pill" title="Always blended in when a trained checkpoint exists — no on/off switch.">
       <span class="dot"></span><span id="rl-label">RL —</span>
     </div>
+    <button id="refresh-btn" class="btn-icon" type="button" title="Refresh data now" aria-label="Refresh data now">⟳</button>
   </div>
 </header>
+
+<div class="scanning-banner" id="scanning-banner" hidden>
+  <span class="scanning-banner-spinner" aria-hidden="true"></span>
+  Scanning now — fetching data and running the strategy set across the universe…
+</div>
 
 <main class="layout">
 
@@ -115,6 +140,7 @@
     <button id="clear-btn" class="btn btn-ghost">🗑 Clear history</button>
 
     <p class="hint" id="scan-hint">Not scanning.</p>
+    <p class="hint hint-pending" id="restart-pending-hint" hidden></p>
     <p class="error" id="scan-error" hidden></p>
   </section>
 
@@ -135,6 +161,11 @@
         <select id="feed-direction">
           <option>All</option><option>BUY</option><option>SELL</option>
         </select>
+        <select id="feed-horizon" title="Long-term = signal detected on 1wk/5d bars. Short/Mid-term = 1d/1h.">
+          <option>All</option>
+          <option value="short_mid">Short/Mid-term</option>
+          <option value="long_term">Long-term</option>
+        </select>
         <select id="feed-sort">
           <option value="time">Sort: Newest</option>
           <option value="confidence">Sort: Confidence</option>
@@ -142,6 +173,11 @@
         <input id="feed-symbol" type="text" placeholder="filter symbol…" spellcheck="false">
       </div>
     </div>
+    <p class="hint">
+      <strong>Horizon</strong> follows the timeframe a signal was detected on — long-term
+      means weekly/5-day bars, short/mid-term means daily or faster. Same strategies, not a
+      separate methodology.
+    </p>
     <div class="feed-list" id="feed-list">
       <div class="feed-empty">No signals yet — start the scanner.</div>
     </div>
@@ -165,12 +201,19 @@
           <option value="6mo">6mo</option>
           <option value="max">max</option>
         </select>
+        <label class="chk-field" title="Two straight trendlines from the lowest-open candle: Peaks through swing highs, Troughs through swing lows. Needs at least 3 confirming candles or it doesn't draw.">
+          <input type="checkbox" id="show-bounds-toggle"> Peaks &amp; Troughs
+        </label>
+        <label class="chk-field" title="Inline 3-state Gaussian HMM fit on this chart's own data — projected forward, not a persisted model">
+          <input type="checkbox" id="show-hmm-toggle"> HMM projection
+        </label>
         <button id="analyse-btn" class="btn btn-start">🔎 Analyse</button>
       </div>
     </div>
 
     <div class="verdict-banner" id="verdict-banner" hidden></div>
     <div class="entry-price-banner" id="entry-price-banner" hidden></div>
+    <div class="hmm-banner" id="hmm-banner" hidden></div>
 
     <div id="chart-container" class="chart-container">
       <div class="chart-placeholder" id="chart-placeholder">Pick a symbol and click Analyse.</div>
@@ -247,7 +290,7 @@
         <thead>
           <tr>
             <th>Bar</th><th>Symbol</th><th>Dir</th><th>Price</th>
-            <th>ROI</th><th>B&amp;H</th><th>Excess</th><th>Win%</th><th>Trades</th><th>Strategy</th><th>Confidence</th>
+            <th>ROI</th><th>B&amp;H</th><th>Excess</th><th>Win%</th><th>Trades</th><th>Strategy</th><th>Horizon</th><th>Confidence</th>
           </tr>
         </thead>
         <tbody id="history-tbody"></tbody>
