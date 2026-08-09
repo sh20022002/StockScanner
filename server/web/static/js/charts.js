@@ -6,8 +6,41 @@ const Charts = (() => {
   let candleSeries = null;
   let volumeSeries = null;
   const overlaySeries = {};
+  const overlayColorByName = {};   // name -> color, kept alongside overlaySeries for the legend
   const overlayColors = ['#4d9dff', '#ffb454', '#c792ea', '#7ee8fa', '#ff8ba7'];
   let hmmSeries = { mean: null, upper: null, lower: null };
+  const HMM_COLOR = '#ff2ec4';
+  const TROUGHS_COLOR = '#3ddc84';
+  const PEAKS_COLOR = '#ff6b81';
+
+  /* ── Legend ─────────────────────────────────────────────────────────────
+     No built-in Lightweight Charts legend is used here (deliberately —
+     lastValueVisible/priceLineVisible are off on every overlay so the chart
+     itself stays uncluttered); this is a small DOM list instead, rebuilt
+     from whatever's actually on the chart right now. */
+  function updateLegend() {
+    const el = document.getElementById('chart-legend');
+    if (!el) return;
+    const items = [];
+    for (const name of Object.keys(overlaySeries)) {
+      items.push({ label: name, color: overlayColorByName[name] });
+    }
+    if (boundsSeries.troughs) items.push({ label: 'Troughs', color: TROUGHS_COLOR });
+    if (boundsSeries.peaks) items.push({ label: 'Peaks', color: PEAKS_COLOR });
+    if (hmmSeries.mean) items.push({ label: 'HMM projection', color: HMM_COLOR });
+
+    el.innerHTML = '';
+    el.hidden = items.length === 0;
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'chart-legend-item';
+      const swatch = document.createElement('span');
+      swatch.className = 'chart-legend-swatch';
+      swatch.style.background = item.color;
+      row.append(swatch, document.createTextNode(item.label));
+      el.appendChild(row);
+    }
+  }
 
   // The backtest-derived markers (renderCandles) and the real historical
   // signal markers (setHistoricalMarkers) are set by two separate async calls
@@ -67,24 +100,27 @@ const Charts = (() => {
 
     Object.values(overlaySeries).forEach(s => chart.removeSeries(s));
     for (const key in overlaySeries) delete overlaySeries[key];
+    for (const key in overlayColorByName) delete overlayColorByName[key];
     clearHmmProjection();   // last symbol's projection must not bleed onto new candles
     clearBounds();          // ditto for the peaks/troughs trendlines
 
     let i = 0;
     for (const [name, points] of Object.entries(payload.overlays || {})) {
       if (!points.length) continue;
+      const color = overlayColors[i++ % overlayColors.length];
       const s = chart.addLineSeries({
-        color: overlayColors[i++ % overlayColors.length],
-        lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+        color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: name,
       });
       s.setData(points);
       overlaySeries[name] = s;
+      overlayColorByName[name] = color;
     }
 
     backtestMarkers = payload.markers || [];
     historicalMarkers = [];   // reset until the caller loads them for this symbol
     applyMarkers();
     chart.timeScale().fitContent();
+    updateLegend();
   }
 
   /* ── HMM regime projection (optional overlay) ─────────────────────────
@@ -97,6 +133,7 @@ const Charts = (() => {
   function clearHmmProjection() {
     if (chart) Object.values(hmmSeries).forEach(s => s && chart.removeSeries(s));
     hmmSeries = { mean: null, upper: null, lower: null };
+    updateLegend();
   }
 
   function renderHmmProjection(payload) {
@@ -106,7 +143,7 @@ const Charts = (() => {
 
     const points = payload.projection;
     hmmSeries.mean = chart.addLineSeries({
-      color: '#ff2ec4', lineWidth: 3, lineStyle: LightweightCharts.LineStyle.Solid,
+      color: HMM_COLOR, lineWidth: 3, lineStyle: LightweightCharts.LineStyle.Solid,
       priceLineVisible: false, lastValueVisible: false, title: 'HMM projection',
     });
     hmmSeries.mean.setData(points.map(p => ({ time: p.time, value: p.price })));
@@ -120,24 +157,34 @@ const Charts = (() => {
     hmmSeries.upper.setData(points.map(p => ({ time: p.time, value: p.upper })));
     hmmSeries.lower = chart.addLineSeries(bandOpts);
     hmmSeries.lower.setData(points.map(p => ({ time: p.time, value: p.lower })));
+    updateLegend();
   }
 
   /* ── Peaks & Troughs (optional overlay) ────────────────────────────────
      Two straight trendlines computed client-side from the loaded candles —
-     not a rolling envelope. Both anchor to "the bottom candle" (the lowest
-     Open in the loaded window): the Troughs line runs from its Open through
-     the last confirming swing-low Open after it; the Peaks line from its
-     High through the last confirming swing-high High after it. A swing
-     point is the standard 3-candle fractal — more extreme than the candle
-     immediately before and after it. Either line needs the bottom candle
-     plus at least 2 confirming swing points after it (3 candles' worth of
-     evidence) or it isn't drawn at all — two arbitrary points aren't a
-     trend, and a misleading line is worse than no line. */
+     not a rolling envelope. Local on purpose: the bottom-candle search only
+     looks at the trailing LOCAL_WINDOW_DAYS, so a 2-year daily load doesn't
+     anchor a "current trend" line to a low from 18 months ago. Both lines
+     anchor to "the bottom candle" (the lowest Open within that window): the
+     Troughs line runs from its Open through the last confirming swing-low
+     Open after it; the Peaks line from its High through the last confirming
+     swing-high High after it. A swing point is the standard 3-candle
+     fractal. Either line needs the bottom candle plus at least 2 confirming
+     swing points after it, AND the resulting line has to span at least
+     MIN_TREND_SPAN_DAYS — this overlay is meant to catch the 2-4 month swing
+     trends technical analysis usually means by "peaks and troughs," not two
+     candles a few days apart. Failing either bar, nothing is drawn — a
+     misleading line is worse than no line. */
+  const LOCAL_WINDOW_DAYS  = 120;   // ~4 months — how far back the bottom-candle search looks
+  const MIN_TREND_SPAN_DAYS = 60;   // ~2 months — shorter spans aren't the pattern this hunts for
+  const DAY_SECONDS = 86400;
+
   let boundsSeries = { peaks: null, troughs: null };
 
   function clearBounds() {
     if (chart) Object.values(boundsSeries).forEach(s => s && chart.removeSeries(s));
     boundsSeries = { peaks: null, troughs: null };
+    updateLegend();
   }
 
   function findSwingIndices(candles, valueOf, isMoreExtreme) {
@@ -151,43 +198,72 @@ const Charts = (() => {
     return swings;
   }
 
-  function renderBounds(candles) {
-    clearBounds();
-    if (!chart || !candles || candles.length < 3) return;
+  function computeBounds(candles) {
+    if (!candles || candles.length < 3) return { troughs: null, peaks: null };
+
+    const lastTime = candles[candles.length - 1].time;
+    const local = candles.filter(c => c.time >= lastTime - LOCAL_WINDOW_DAYS * DAY_SECONDS);
+    if (local.length < 3) return { troughs: null, peaks: null };
 
     let bottomIdx = 0;
-    for (let i = 1; i < candles.length; i++) {
-      if (candles[i].open < candles[bottomIdx].open) bottomIdx = i;
+    for (let i = 1; i < local.length; i++) {
+      if (local[i].open < local[bottomIdx].open) bottomIdx = i;
     }
 
-    const troughSwings = findSwingIndices(candles, c => c.open, (a, b) => a < b)
+    const troughSwings = findSwingIndices(local, c => c.open, (a, b) => a < b)
       .filter(i => i > bottomIdx);
-    const peakSwings = findSwingIndices(candles, c => c.high, (a, b) => a > b)
+    const peakSwings = findSwingIndices(local, c => c.high, (a, b) => a > b)
       .filter(i => i > bottomIdx);
+
+    const spansEnough = (lastIdx) =>
+      (local[lastIdx].time - local[bottomIdx].time) >= MIN_TREND_SPAN_DAYS * DAY_SECONDS;
+
+    const out = { troughs: null, peaks: null };
 
     if (troughSwings.length >= 2) {
       const lastIdx = troughSwings[troughSwings.length - 1];
-      boundsSeries.troughs = chart.addLineSeries({
-        color: '#3ddc84', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
-        priceLineVisible: false, lastValueVisible: false, title: 'Troughs',
-      });
-      boundsSeries.troughs.setData([
-        { time: candles[bottomIdx].time, value: candles[bottomIdx].open },
-        { time: candles[lastIdx].time,   value: candles[lastIdx].open },
-      ]);
+      if (spansEnough(lastIdx)) {
+        out.troughs = [
+          { time: local[bottomIdx].time, value: local[bottomIdx].open },
+          { time: local[lastIdx].time,   value: local[lastIdx].open },
+        ];
+      }
     }
 
     if (peakSwings.length >= 2) {
       const lastIdx = peakSwings[peakSwings.length - 1];
+      if (spansEnough(lastIdx)) {
+        out.peaks = [
+          { time: local[bottomIdx].time, value: local[bottomIdx].high },
+          { time: local[lastIdx].time,   value: local[lastIdx].high },
+        ];
+      }
+    }
+
+    return out;
+  }
+
+  function renderBounds(candles) {
+    clearBounds();
+    if (!chart) return;
+    const { troughs, peaks } = computeBounds(candles);
+
+    if (troughs) {
+      boundsSeries.troughs = chart.addLineSeries({
+        color: TROUGHS_COLOR, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+        priceLineVisible: false, lastValueVisible: false, title: 'Troughs',
+      });
+      boundsSeries.troughs.setData(troughs);
+    }
+
+    if (peaks) {
       boundsSeries.peaks = chart.addLineSeries({
-        color: '#ff6b81', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+        color: PEAKS_COLOR, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
         priceLineVisible: false, lastValueVisible: false, title: 'Peaks',
       });
-      boundsSeries.peaks.setData([
-        { time: candles[bottomIdx].time, value: candles[bottomIdx].high },
-        { time: candles[lastIdx].time,   value: candles[lastIdx].high },
-      ]);
+      boundsSeries.peaks.setData(peaks);
     }
+    updateLegend();
   }
 
   /* Real past signals (server/signal_log), distinct from the backtest-derived

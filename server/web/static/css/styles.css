@@ -350,6 +350,8 @@ html, body {
   padding: 10px 12px;
   transition: background 0.15s, border-color 0.15s;
 }
+.sector-card[title] { cursor: pointer; }
+.sector-card[title]:hover { filter: brightness(1.15); }
 .sector-card.upside {
   background: color-mix(in srgb, var(--green) 13%, var(--bg-inset));
   border-color: color-mix(in srgb, var(--green) 38%, var(--border));
@@ -428,12 +430,21 @@ html, body {
   border-radius: 6px; color: var(--text); padding: 6px 9px; font-size: 0.85em;
 }
 .chart-controls input[type="text"] { width: 150px; }
+/* .btn defaults to flex:1 for the primary Start/Stop-style buttons it was
+   built for — wrong here, where it sits alongside inputs/selects/checkboxes
+   that size to content. */
+.chart-controls .btn { flex: 0 0 auto; }
 
 .chk-field {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 0.82em; color: var(--text-dim); cursor: pointer; white-space: nowrap;
 }
 .chk-field input[type="checkbox"] { accent-color: var(--blue); cursor: pointer; }
+
+.ma-selector {
+  display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 5px 9px; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 6px;
+}
 
 .verdict-banner {
   margin: 10px 0; padding: 8px 12px; border-radius: 7px;
@@ -459,11 +470,34 @@ html, body {
 .hmm-state.negative { color: var(--red); }
 .hmm-state.neutral  { color: var(--amber); }
 
+.long-term-banner {
+  margin: 0 0 10px; padding: 7px 12px; border-radius: 7px;
+  font-size: 0.8em; border: 1px solid var(--border); color: var(--text-dim);
+}
+.long-term-banner strong { color: var(--text); font-weight: 600; }
+
 .chart-container { height: 380px; margin-top: 4px; position: relative; }
 .chart-placeholder {
   height: 100%; display: flex; align-items: center; justify-content: center;
   color: var(--text-mute);
 }
+/* Fullscreen fills the viewport via the UA stylesheet already; this just
+   keeps the dark theme (instead of a default black/white) and gives the
+   chart some breathing room instead of touching the screen edges. */
+.chart-container:fullscreen, .chart-container:-webkit-full-screen {
+  height: 100vh; background: var(--bg); padding: 16px;
+}
+
+.chart-legend {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  display: flex; flex-direction: column; gap: 3px;
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 9px; pointer-events: none;
+  font-size: 0.74em; color: var(--text-dim);
+}
+.chart-legend-item { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.chart-legend-swatch { width: 10px; height: 2px; border-radius: 1px; flex: none; }
 
 .strategy-table-wrap, .history-table-wrap { overflow-x: auto; margin-top: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
@@ -483,21 +517,6 @@ tr.selected-row td { background: color-mix(in srgb, var(--blue) 10%, transparent
 .num-pos { color: var(--green); }
 .num-neg { color: var(--red); }
 .star { color: var(--amber); }
-
-/* ── Long-term value screen ────────────────────────────────────────── */
-
-.long-term-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-.lt-field {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 0.8em; color: var(--text-dim); white-space: nowrap;
-}
-.lt-field input[type="number"] {
-  width: 64px; background: var(--bg-inset); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--text); padding: 5px 7px; font-size: 0.95em;
-}
-.long-term-table-wrap { overflow-x: auto; margin-top: 10px; }
-.long-term-table tbody tr { cursor: pointer; }
-.long-term-table tbody tr:hover td { background: var(--bg-inset); }
 
 /* ── Past signals ───────────────────────────────────────────────────── */
 

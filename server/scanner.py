@@ -158,7 +158,8 @@ def scan(symbols: list[str],
          quiet: bool = False,
          min_margin: int = DEFAULT_MIN_MARGIN,
          stop_event=None,
-         return_data: bool = False):
+         return_data: bool = False,
+         on_result=None):
     """
     Download every symbol once, analyse them in parallel, return the signals.
 
@@ -176,6 +177,14 @@ def scan(symbols: list[str],
             signals — lets a caller (e.g. the RL live hook) reuse the same
             batch-downloaded frames instead of re-fetching per symbol, which is
             exactly the anti-pattern removed from the rest of this pipeline.
+        on_result: Optional callback(signal_dict, df) invoked the moment each
+            symbol's result comes back — before the rest of the universe has
+            even started, not after the whole scan finishes. `df` is that
+            symbol's own batch-downloaded frame, handed back so a caller that
+            wants live per-symbol enrichment (e.g. RL annotation) doesn't need
+            stock_data returned separately. Exceptions inside the callback are
+            logged and swallowed — a broken subscriber must not take down the
+            scan.
 
     Returns:
         A list of signal dicts, as produced by analyse_symbol — or, with
@@ -190,6 +199,7 @@ def scan(symbols: list[str],
         return ([], {}) if return_data else []
 
     items = list(stock_data.items())
+    items_by_symbol = dict(items)
     workers = max_workers or default_workers()
     signals: list[dict] = []
 
@@ -198,6 +208,15 @@ def scan(symbols: list[str],
 
     def _finish():
         return (signals, stock_data) if return_data else signals
+
+    def _emit(result: dict):
+        signals.append(result)
+        if on_result is None:
+            return
+        try:
+            on_result(result, items_by_symbol.get(result['symbol']))
+        except Exception as e:
+            print(f'[scan] on_result callback failed for {result.get("symbol")}: {e}')
 
     if use_processes and workers > 1 and len(items) > 1:
         try:
@@ -218,7 +237,7 @@ def scan(symbols: list[str],
                         print(f'[ERROR] {futures[future]}: {e}')
                         continue
                     if result:
-                        signals.append(result)
+                        _emit(result)
             return _finish()
         except Exception as e:
             print(f'[scan] process pool unavailable ({e}); running in-process.')
@@ -230,6 +249,6 @@ def scan(symbols: list[str],
         result = analyse_symbol(sym, df, timeframe, lookback, TRAIN_FRACTION,
                                 min_margin)
         if result:
-            signals.append(result)
+            _emit(result)
 
     return _finish()

@@ -50,16 +50,29 @@ page and pushes live signals to it over Server-Sent Events — no polling, no
 full-page reloads. The scanner runs as a background task inside that same
 process, started and stopped from the page itself:
 
-- **Today's Signals by Sector** — a row of cards at the top of the page,
-  today's signals grouped by GICS sector (count, buy/sell split, % that beat
-  buy-and-hold, average excess ROI). Sector comes from
+- **Today's Signals by Sector** — top of the page, today's signals grouped by
+  GICS sector (count, buy/sell split, % that beat buy-and-hold, average
+  excess ROI). Sector comes from
   `scraping.get_sector_map` — the screener's quotes don't actually carry a
   `sector` field, so this queries `get_us_equities` once per GICS sector and
   tags every symbol with the sector that was queried for it, the same
   batched-not-per-symbol principle as the rest of universe fetching. Cached
-  6h, same as the universe itself. Each card is tinted green/red by whether
-  its average excess ROI is positive or negative — the same number already
-  shown as text, just readable at a glance across the whole row.
+  6h, same as the universe itself; one sector's query failing doesn't blank
+  the other ten — that sector's symbols just fall under "Unknown" instead of
+  502ing the whole panel. If today has no signals yet (scanner hasn't run
+  today, market just opened, it's the weekend), the panel falls back to the
+  most recent day that has any rather than sitting on an empty "No signals
+  yet today" — the date label says which case you're looking at. Each card is
+  tinted green/red by whether its average excess ROI is positive or
+  negative — the same number already shown as text, just readable at a
+  glance across the whole row. Refreshed on every new SSE signal and every
+  manual ⟳, plus a plain 60s `setInterval` (`app.js` `init()`) so the tint
+  doesn't go stale just because no fresh signal happened to land in the last
+  few minutes. Each card is also clickable — `sector_summary` carries a
+  deduplicated `symbols` list per sector now, and a click loads whichever of
+  those symbols has a long-term-value signal (falling back to the first one)
+  straight into the Chart panel below, so a sector card is also a shortcut
+  into a stock from it.
 - **Scanner Controls** — Universe (all US exchanges / NASDAQ / NYSE / NYSE
   American), Sector (any GICS sector or all of them), and a market cap floor
   with quick-select tiers (Nano/Micro/Small/Mid/Large/Mega) alongside the
@@ -84,28 +97,79 @@ process, started and stopped from the page itself:
   a shimmering blue/green banner across the top of the page and a faster,
   brighter pill in the top bar, both driven by a real `is_scanning` flag
   (`web.app.ScannerState`), not a client-side guess.
-- **Live Signal Feed** — updates the moment a scan finds something. Click any
-  row (here or in Signal History below) to load that symbol. Filterable by
-  direction, symbol, and **Horizon** (Long-term vs Short/Mid-term) — see the
-  hint under the feed filters for what that means; the short version is it
-  follows the bar interval a signal was detected on (`scanner.investment_horizon`),
-  a timeframe proxy, not the fundamentals-based Long-Term Value Screen below.
-  A **⟳** button in the top bar force-refreshes status, signals, and the
-  panels below without waiting for the next SSE push.
+- **Live Signal Feed** — updates the moment a scan finds something, symbol by
+  symbol, not after the whole scan finishes. `scanner.scan`'s `on_result`
+  callback fires the instant each symbol's analysis returns — mid-universe on
+  a hundreds-of-symbols scan, not after the last one — and
+  `web.app._scanner_loop` pushes it straight over SSE from there, so the feed
+  fills in progressively while a scan is still running rather than sitting
+  static until it's done. Click any row (here or in Signal History below) to
+  load that symbol. Filterable by direction, symbol, and **Horizon**
+  (Long-term vs Short/Mid-term) — see the hint under the feed filters for what
+  that means; the short version is it follows the bar interval a signal was
+  detected on (`scanner.investment_horizon`), a timeframe proxy.
+
+  The long-term value screen (see below) has no panel of its own — its
+  BUY-only results (`strategy: "long_term_value"`) show up as ordinary rows
+  right here, alongside the 12 technical strategies, one signal is one row
+  either way. A long-term row shows what actually applies to it (P/E, score)
+  instead of the ROI/excess figures that don't — `buildFeedItem` special-cases
+  `strategy === 'long_term_value'` rather than printing a row of dashes. The
+  rest of that screen's detail (SMA100/150/200, EPS, earnings yield) isn't
+  crammed into the row at all; it only shows up once you click through to the
+  symbol below. Sort-by-confidence and the Signal History "Confidence" column
+  both use `signalConfidence()` now instead of reading `rl_confidence`
+  directly — RL confidence for the 12 technical strategies, or `score / 100`
+  for a `long_term_value` row (which has no RL annotation at all), so a
+  long-term signal sorts and labels sensibly instead of always reading `—`
+  and sinking to the bottom. A **⟳** button in the top bar force-refreshes
+  status, signals, and the panels below without waiting for the next SSE push.
 - **Chart & Backtest** — a candlestick chart (TradingView's Lightweight
-  Charts, vendored locally, no CDN) with SMA overlays and buy/sell markers,
-  plus the full 12-strategy backtest table for whatever symbol you pick. Two
-  optional overlays, off by default:
+  Charts, vendored locally, no CDN) with buy/sell markers, a small legend in
+  the chart's top-left corner naming every line currently drawn (SMA
+  overlays, Peaks/Troughs, HMM projection — color-matched swatches, rebuilt
+  by `Charts.updateLegend()` whenever any of those change), plus the full
+  12-strategy backtest table for whatever symbol you pick. A **⛶ Full
+  screen** button next to Analyse puts just the chart into the browser's
+  Fullscreen API on `#chart-container`; the chart already has `autoSize:
+  true` so its own `ResizeObserver` picks up the container's size change and
+  redraws without any manual resize call — the CSS `:fullscreen` rule just
+  keeps the dark theme instead of the UA default.
+
+  Which SMAs overlay the chart is a checkbox group now (SMA20/50/100/150/200,
+  20/50/150 checked by default) instead of a hardcoded `SMA20,SMA50,SMA150`
+  — `loadSymbol` builds the `overlays` query param from whichever `.ma-toggle`
+  boxes are checked at Analyse time, same as the interval/period selects.
+  SMA100/SMA200 were already computed server-side and already worked through
+  `_overlay_series`'s generic column lookup; only the picker UI was missing.
+
+  Two further overlays, off by default, both driven purely by their own
+  checkbox rather than requiring a full re-Analyse: toggling either one calls
+  `Charts.renderBounds`/`clearBounds` or fetches+renders the HMM projection
+  immediately, off `state.lastLoaded` (the last-loaded symbol/interval/period/
+  candles) rather than a fresh `loadSymbol` round trip. `loadSymbol` calls the
+  same two functions (`applyBoundsDisplay`, `applyHmmDisplay`) once after a
+  normal load, so a checkbox that's already checked still applies to whatever
+  symbol you just switched to — clicking the checkbox and switching symbols
+  both go through one code path instead of two.
   - **Peaks & Troughs** — two straight trendlines computed client-side from
-    the loaded candles (`Charts.renderBounds`), not a rolling envelope. Both
-    anchor to "the bottom candle" (the lowest Open in the loaded window): the
-    Troughs line runs from its Open through the last confirming swing-low
-    Open after it; the Peaks line from its High through the last confirming
-    swing-high High after it. A swing point is the standard 3-candle
-    fractal — more extreme than the candle immediately before and after it.
-    Either line needs the bottom candle plus at least 2 confirming swings
-    after it or it isn't drawn at all — two points aren't a trend, and a
-    misleading line is worse than no line.
+    the loaded candles (`Charts.computeBounds`/`renderBounds`), not a rolling
+    envelope. Local on purpose, sized to catch the 2-4 month swing trends
+    "peaks and troughs" usually means in technical analysis: the bottom-candle
+    search only looks at the trailing ~4 months of candles (`LOCAL_WINDOW_DAYS
+    = 120`), by real elapsed time from each candle's timestamp rather than bar
+    count — so it works the same way regardless of chart interval, and a
+    2-year daily load doesn't anchor a "current trend" line to a low from 18
+    months ago. Both lines anchor to "the bottom candle" (the lowest Open
+    within that local window): the Troughs line runs from its Open through
+    the last confirming swing-low Open after it; the Peaks line from its High
+    through the last confirming swing-high High after it. A swing point is
+    the standard 3-candle fractal — more extreme than the candle immediately
+    before and after it. Either line needs the bottom candle plus at least 2
+    confirming swings after it, *and* the resulting line has to span at least
+    ~2 months (`MIN_TREND_SPAN_DAYS = 60`) — a real pivot pair three days
+    apart isn't the 2-4 month pattern this is meant to catch. Failing either
+    bar, nothing is drawn — a misleading line is worse than no line.
   - **HMM projection** — a 3-state Gaussian HMM (`server/hmm_forecast.py`)
     fit fresh on the chart's own data (no MongoDB, unlike the legacy
     `server/prediction.py`), projected forward as a bold solid line (bright
@@ -140,20 +204,40 @@ process, started and stopped from the page itself:
   actually traded recently. If price is already through its own SMA, the
   suggestion is just the current price — there's no better pullback level in
   the window.
-- **Long-Term Value Screen** — an on-demand, fundamentals-based ranking of
-  the scanner's current universe (`server/long_term_screen.py`,
-  `GET /api/long-term-screen`), separate from the 12 technical strategies:
-  price above its 150-day SMA but not more than ~50% above it (a real uptrend,
-  not overextended), a configurable-ceiling trailing P/E (default 35), and
-  positive trailing EPS. The trend check runs first against the OHLCV data
-  the scanner already batch-downloads for free; the per-symbol P/E/EPS
-  lookup (`scraping.get_fundamentals`, a `yf.Ticker(...).info` call per
-  symbol, threaded and cached 6h) only runs for the survivors, so a click on
-  "Run Screen" doesn't cost one network round-trip per symbol in the
-  universe. Results are ranked by a 0–100 score split evenly across trend
-  strength, valuation, and earnings yield (EPS/price). This is a pass/fail
-  screen, not a backtested strategy — P/E and EPS don't move bar-to-bar, so
-  there's no ROI column here the way there is for the other 12.
+- **Long-Term Value Screen** — no dedicated panel; its signals live in the
+  Live Signal Feed and Signal History above, and its full detail lives on the
+  symbol view below once you click through. A fundamentals-based ranking of
+  the scanner's current universe (`server/long_term_screen.py`), separate
+  from the 12 technical strategies: price above its 150-day SMA but not more
+  than ~50% above it (a real uptrend, not overextended), a
+  configurable-ceiling trailing P/E (default 35), and positive trailing EPS.
+  SMA100 and SMA200 ride along as extra context (the shorter and longer ends
+  of the moving-average ribbon) — informational only, never gating inclusion
+  or affecting the score, so carrying them can't shrink the result set or
+  change who passes. The trend check runs first against the OHLCV data the
+  scanner already batch-downloads for free; the per-symbol P/E/EPS lookup
+  (`scraping.get_fundamentals`, a `yf.Ticker(...).info` call per symbol,
+  threaded and cached 6h) only runs for the survivors. Results are ranked by
+  a 0–100 score split evenly across trend strength, valuation, and earnings
+  yield (EPS/price). This is a pass/fail screen, not a backtested strategy —
+  P/E and EPS don't move bar-to-bar, so there's no ROI column here the way
+  there is for the other 12.
+
+  Runs automatically as part of every scan cycle (`web.app._run_scan_cycle`),
+  right after the technical scan and reusing its batch-downloaded frames
+  whenever the scanner's own timeframe is daily. Its BUY-only results are
+  pushed into the same Live Signal Feed and Signal History as the 12
+  strategies, tagged `strategy: "long_term_value"`, `horizon: "long_term"`.
+  Because a symbol can legitimately fire both a technical signal *and*
+  qualify for this screen on the same day, `signal_log`'s dedupe key includes
+  `strategy` (not just symbol/direction/day) so the two don't collide and
+  silently drop one. Click through to a symbol with a recent long-term-value
+  signal and its SMA100/150/200, P/E, EPS, earnings yield and score show up
+  in a banner above the chart (`renderLongTermBanner`, sourced straight from
+  the already-loaded feed data — no extra fetch), the same place the
+  suggested-entry and HMM banners live. `GET /api/long-term-screen` still
+  exists as a standalone on-demand endpoint (different thresholds, scripting,
+  etc.) — it just isn't wired to a UI control anymore.
 - **Signal Distribution** — buy/sell split and an excess-ROI histogram,
   drawn on canvas.
 - **Signal History** — filterable table (same filters as the feed, plus a

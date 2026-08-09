@@ -13,9 +13,12 @@ const state = {
   status: null,
   nextScanAt: null,   // epoch ms — set by applyStatus(), ticked down by tickNextScan()
   scanBusy: false,    // true while a start/stop request is in flight — blocks double-clicks
+  lastLoaded: null,   // { symbol, interval, period, candles } from the last successful loadSymbol()
+                       // — lets the Peaks/HMM checkboxes react immediately without a full reload.
 };
 
 const HORIZON_LABELS = { long_term: 'Long-term', short_mid: 'Short/Mid-term' };
+const STRATEGY_LABELS = { long_term_value: 'Long-Term Value' };
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,6 +33,17 @@ function fmtNum(v, digits = 2) {
 function signClass(v) {
   if (v === null || v === undefined) return '';
   return v > 0 ? 'num-pos' : v < 0 ? 'num-neg' : '';
+}
+// A single 0-1 "how much to trust this" number regardless of where the signal
+// came from: RL confidence for the 12 technical strategies, or the long-term
+// value screen's own 0-100 score (already a confidence-shaped ranking, see
+// long_term_screen._score) for long_term_value signals, which have no RL
+// annotation at all. Used anywhere a signal list is sorted/labelled by
+// confidence so a long-term row doesn't just sink to the bottom as '—'.
+function signalConfidence(sig) {
+  if (sig.rl_confidence != null) return sig.rl_confidence;
+  if (sig.strategy === 'long_term_value' && sig.score != null) return sig.score / 100;
+  return null;
 }
 
 /* ── Status / metrics ─────────────────────────────────────────────────── */
@@ -127,16 +141,33 @@ async function refreshSummary() {
   try { applySummary(await Api.signalsSummary()); } catch (_) {}
 }
 
+function loadSectorSymbol(symbols) {
+  if (!symbols || !symbols.length) return;
+  // Prefer a long-term-value candidate from this sector — that's the point
+  // of routing through a sector card rather than any random stock: it
+  // surfaces renderLongTermBanner's detail (SMA100/150/200, P/E, EPS,
+  // earnings yield, score) for a stock actually relevant to long-term
+  // investing, not just whichever technical signal happened to fire.
+  const longTerm = state.signals.find(
+    s => s.strategy === 'long_term_value' && symbols.includes(s.symbol));
+  loadSymbol(longTerm ? longTerm.symbol : symbols[0]);
+}
+
 function renderSectorStats(data) {
   const grid = $('sector-stats-grid');
-  $('sector-stats-date').textContent = data.date ? `as of ${data.date}` : '';
+  const dateEl = $('sector-stats-date');
+  if (!data.date) {
+    dateEl.textContent = '';
+  } else {
+    dateEl.textContent = data.is_today ? `today, ${data.date}` : `most recent session — ${data.date}`;
+  }
   const rows = data.sectors || [];
   grid.innerHTML = '';
 
   if (!rows.length) {
     const empty = document.createElement('div');
     empty.className = 'feed-empty';
-    empty.textContent = 'No signals yet today.';
+    empty.textContent = 'No signals recorded yet — start the scanner.';
     grid.appendChild(empty);
     return;
   }
@@ -147,6 +178,10 @@ function renderSectorStats(data) {
     // below is colored by, just applied to the whole card for a fast scan.
     const tone = r.avg_excess > 0 ? 'upside' : r.avg_excess < 0 ? 'downside' : '';
     card.className = ('sector-card ' + tone).trim();
+    if ((r.symbols || []).length) {
+      card.title = `Click to see a ${r.sector} stock — long-term investing detail included`;
+      card.addEventListener('click', () => loadSectorSymbol(r.symbols));
+    }
 
     const name = document.createElement('div');
     name.className = 'sector-card-name';
@@ -181,7 +216,18 @@ function renderSectorStats(data) {
 }
 
 async function refreshSectorStats() {
-  try { renderSectorStats(await Api.sectorSummary()); } catch (_) {}
+  try {
+    renderSectorStats(await Api.sectorSummary());
+  } catch (e) {
+    console.error('sector stats load failed', e);
+    $('sector-stats-date').textContent = '';
+    const grid = $('sector-stats-grid');
+    grid.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'feed-empty';
+    empty.textContent = `Couldn't load sector stats: ${e.message}`;
+    grid.appendChild(empty);
+  }
 }
 
 /* ── Feed ─────────────────────────────────────────────────────────────── */
@@ -197,10 +243,11 @@ function feedRowMatches(sig) {
 
 function sortSignals(signals) {
   if (state.sortBy !== 'confidence') return signals;
-  // Highest RL confidence first; signals without one (no RL checkpoint yet,
-  // or a symbol the live hook skipped) sink to the bottom rather than being
-  // dropped, so switching sort mode never hides a signal.
-  return [...signals].sort((a, b) => (b.rl_confidence ?? -1) - (a.rl_confidence ?? -1));
+  // Highest confidence first (RL confidence, or score/100 for long-term-value
+  // signals — see signalConfidence); signals with neither (no RL checkpoint
+  // yet, or a symbol the live hook skipped) sink to the bottom rather than
+  // being dropped, so switching sort mode never hides a signal.
+  return [...signals].sort((a, b) => (signalConfidence(b) ?? -1) - (signalConfidence(a) ?? -1));
 }
 
 function buildFeedItem(sig) {
@@ -225,20 +272,34 @@ function buildFeedItem(sig) {
   right.className = 'feed-right';
   const price = document.createElement('span');
   price.textContent = `$${fmtNum(sig.price)}`;
-  const excess = document.createElement('span');
-  excess.className = 'feed-excess ' + signClass(sig.excess_roi);
-  excess.style.marginLeft = '8px';
-  excess.textContent = `excess ${fmtPct(sig.excess_roi)}`;
-  const strat = document.createElement('span');
-  strat.className = 'feed-strategy';
-  strat.textContent = sig.strategy || '';
-  right.append(price, excess, strat);
+  right.append(price);
 
-  if (sig.horizon) {
-    const horizon = document.createElement('span');
-    horizon.className = 'feed-strategy';
-    horizon.textContent = ` · ${HORIZON_LABELS[sig.horizon] || sig.horizon}`;
-    right.append(horizon);
+  if (sig.strategy === 'long_term_value') {
+    // No ROI/excess here — this is a fundamentals pass/fail, not a
+    // backtested crossover (see long_term_screen.py). Show what actually
+    // applies to it instead of a row of '—'.
+    const detail = document.createElement('span');
+    detail.className = 'feed-strategy';
+    detail.style.marginLeft = '8px';
+    detail.textContent =
+      `${STRATEGY_LABELS.long_term_value} · P/E ${fmtNum(sig.pe_ratio)} · score ${fmtNum(sig.score, 1)}`;
+    right.append(detail);
+  } else {
+    const excess = document.createElement('span');
+    excess.className = 'feed-excess ' + signClass(sig.excess_roi);
+    excess.style.marginLeft = '8px';
+    excess.textContent = `excess ${fmtPct(sig.excess_roi)}`;
+    const strat = document.createElement('span');
+    strat.className = 'feed-strategy';
+    strat.textContent = sig.strategy || '';
+    right.append(excess, strat);
+
+    if (sig.horizon) {
+      const horizon = document.createElement('span');
+      horizon.className = 'feed-strategy';
+      horizon.textContent = ` · ${HORIZON_LABELS[sig.horizon] || sig.horizon}`;
+      right.append(horizon);
+    }
   }
 
   if (sig.rl_action) {
@@ -318,13 +379,14 @@ function renderHistory() {
     const tr = document.createElement('tr');
     tr.title = `Click to see ${s.symbol}'s past signals and chart`;
     tr.addEventListener('click', () => loadSymbol(s.symbol));
+    const confidence = signalConfidence(s);
     const cells = [
       s.time || '', s.symbol, s.direction, `$${fmtNum(s.price)}`,
       fmtPct(s.roi), fmtPct(s.benchmark_roi), fmtPct(s.excess_roi),
       s.win_rate != null ? `${fmtNum(s.win_rate, 1)}%` : '—',
       s.trades ?? '—', s.strategy || '',
       s.horizon ? (HORIZON_LABELS[s.horizon] || s.horizon) : '—',
-      s.rl_confidence != null ? `${Math.round(s.rl_confidence * 100)}%` : '—',
+      confidence != null ? `${Math.round(confidence * 100)}%` : '—',
     ];
     cells.forEach((val, i) => {
       const td = document.createElement('td');
@@ -343,7 +405,9 @@ function exportCsv() {
                   'excess_roi', 'win_rate', 'trades', 'strategy', 'horizon', 'rl_confidence'];
   const lines = [header.join(',')];
   for (const s of rows) {
-    lines.push(header.map(k => JSON.stringify(s[k] ?? '')).join(','));
+    lines.push(header.map(k =>
+      JSON.stringify((k === 'rl_confidence' ? signalConfidence(s) : s[k]) ?? '')
+    ).join(','));
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -355,21 +419,52 @@ function exportCsv() {
 
 /* ── Chart / symbol analysis ─────────────────────────────────────────── */
 
+/* Peaks/Troughs and HMM are deliberately NOT tied to the interval/period
+   selects the way overlays are — they're driven purely by their own
+   checkboxes (see the change listeners in wireControls), computed/fetched
+   fresh every time either checkbox is clicked, using state.lastLoaded rather
+   than a full symbol reload. loadSymbol calls these same two functions once
+   after a fresh load so a checkbox already checked stays honoured for the
+   newly-loaded symbol too. */
+function applyBoundsDisplay() {
+  if (!state.lastLoaded) return;
+  // Peaks/Troughs are computed client-side from the already-loaded candles,
+  // not a server-supplied overlay column — see Charts.renderBounds.
+  if ($('show-bounds-toggle').checked) Charts.renderBounds(state.lastLoaded.candles);
+  else Charts.clearBounds();
+}
+
+async function applyHmmDisplay() {
+  if (!state.lastLoaded) return;
+  if (!$('show-hmm-toggle').checked) {
+    Charts.clearHmmProjection();
+    renderHmmBanner(null);
+    return;
+  }
+  const { symbol, interval, period } = state.lastLoaded;
+  try {
+    const projection = await Api.symbolHmmProjection(symbol, { interval, period });
+    Charts.renderHmmProjection(projection);
+    renderHmmBanner(projection);
+  } catch (e) {
+    console.error('hmm projection load failed', e);
+    Charts.clearHmmProjection();
+    renderHmmBanner(null);
+  }
+}
+
 async function loadSymbol(symbol) {
   $('symbol-input').value = symbol;
   const interval = $('chart-interval').value;
   const period = $('chart-period').value;
-  const showBounds = $('show-bounds-toggle').checked;
-  const showHmm = $('show-hmm-toggle').checked;
-  const overlays = 'SMA20,SMA50,SMA150';
+  const overlays = Array.from(document.querySelectorAll('.ma-toggle:checked')).map(el => el.value).join(',');
   let data;
 
   try {
     data = await Api.symbol(symbol, { interval, period, overlays });
     Charts.renderCandles(data);
-    // Peaks/Troughs are computed client-side from the same candles, not a
-    // server-supplied overlay column — see Charts.renderBounds.
-    if (showBounds) Charts.renderBounds(data.candles); else Charts.clearBounds();
+    state.lastLoaded = { symbol: data.symbol, interval, period, candles: data.candles };
+    applyBoundsDisplay();
 
     const banner = $('verdict-banner');
     banner.hidden = false;
@@ -386,8 +481,8 @@ async function loadSymbol(symbol) {
 
     renderStrategyTable(data.strategies, data.best_strategy);
     renderCompanyInfo(data.meta);
+    renderLongTermBanner(data.symbol);
     if (data.verdict !== 'BUY' && data.verdict !== 'SELL') renderEntryPrice(null);
-    if (!showHmm) { Charts.clearHmmProjection(); renderHmmBanner(null); }
   } catch (e) {
     alert(`Failed to load ${symbol}: ${e.message}`);
     return;
@@ -422,18 +517,7 @@ async function loadSymbol(symbol) {
         renderEntryPrice(null);
       }
     })(),
-    (async () => {
-      if (!showHmm) return;
-      try {
-        const projection = await Api.symbolHmmProjection(symbol, { interval, period });
-        Charts.renderHmmProjection(projection);
-        renderHmmBanner(projection);
-      } catch (e) {
-        console.error('hmm projection load failed', e);
-        Charts.clearHmmProjection();
-        renderHmmBanner(null);
-      }
-    })(),
+    applyHmmDisplay(),
   ]);
 }
 
@@ -461,6 +545,31 @@ function renderHmmBanner(projection) {
   const strong = document.createElement('strong');
   strong.textContent = `${projection.projection.length} bars forward`;
   el.append(strong, ' — expected value under the fitted regime, not a price prediction.');
+  el.hidden = false;
+}
+
+function renderLongTermBanner(symbol) {
+  const el = $('long-term-banner');
+  // Long-term-value signals arrive through the same feed as everything else
+  // (see web.app._run_scan_cycle) — state.signals is newest-first, so the
+  // first match is the most recent read on this symbol. No extra fetch.
+  const sig = state.signals.find(s => s.symbol === symbol && s.strategy === 'long_term_value');
+  if (!sig) { el.hidden = true; return; }
+
+  const parts = [
+    sig.sma100 != null ? `SMA100 $${fmtNum(sig.sma100)}` : null,
+    `SMA150 $${fmtNum(sig.sma150)}`,
+    sig.sma200 != null ? `SMA200 $${fmtNum(sig.sma200)}` : null,
+    `P/E ${fmtNum(sig.pe_ratio)}`,
+    `EPS $${fmtNum(sig.eps)}`,
+    `yield ${fmtNum(sig.earnings_yield, 1)}%`,
+    `score ${fmtNum(sig.score, 1)}/100`,
+  ].filter(Boolean);
+
+  el.textContent = '';
+  const label = document.createElement('strong');
+  label.textContent = 'Long-term value screen: ';
+  el.append(label, parts.join(' · '));
   el.hidden = false;
 }
 
@@ -610,64 +719,6 @@ function renderStrategyTable(rows, best) {
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
-  }
-}
-
-function renderLongTermScreen(rows) {
-  const table = $('long-term-table');
-  const tbody = $('long-term-tbody');
-  const empty = $('long-term-empty');
-  tbody.innerHTML = '';
-
-  const hasRows = !!(rows && rows.length);
-  table.hidden = !hasRows;
-  empty.hidden = hasRows;
-  if (!hasRows) {
-    empty.textContent = rows
-      ? 'No symbols in the current universe cleared the trend/P/E/EPS bars.'
-      : 'Click “Run Screen” to rank the current universe.';
-    return;
-  }
-
-  for (const r of rows) {
-    const tr = document.createElement('tr');
-    tr.addEventListener('click', () => loadSymbol(r.symbol));
-
-    const vals = [
-      r.symbol, fmtNum(r.price), fmtNum(r.sma150), fmtNum(r.trend_ratio, 3),
-      fmtNum(r.pe_ratio), fmtNum(r.eps), `${fmtNum(r.earnings_yield, 1)}%`, fmtNum(r.score, 1),
-    ];
-    vals.forEach((v) => {
-      const td = document.createElement('td');
-      td.textContent = v;
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  }
-}
-
-async function runLongTermScreen() {
-  const btn = $('lt-run-btn');
-  const params = {
-    max_pe:    $('lt-max-pe').value,
-    min_trend: $('lt-min-trend').value,
-    max_trend: $('lt-max-trend').value,
-  };
-  btn.disabled = true;
-  btn.textContent = 'Scanning…';
-  $('long-term-empty').hidden = false;
-  $('long-term-empty').textContent = 'Running the screen against the current universe…';
-  $('long-term-table').hidden = true;
-  try {
-    const rows = await Api.longTermScreen(params);
-    renderLongTermScreen(rows);
-  } catch (e) {
-    $('long-term-empty').hidden = false;
-    $('long-term-empty').textContent = `Screen failed: ${e.message}`;
-    $('long-term-table').hidden = true;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '🔎 Run Screen';
   }
 }
 
@@ -877,6 +928,30 @@ function scheduleConfigRestart() {
   }, 10000);
 }
 
+/* ── Chart fullscreen ────────────────────────────────────────────────── */
+/* Charts.ensureChart() sets autoSize:true, which attaches a ResizeObserver
+   to #chart-container — entering/exiting fullscreen just changes that
+   container's box (see the :fullscreen CSS rule), and the chart resizes
+   itself with no manual chart.resize() call needed here. */
+
+function toggleChartFullscreen() {
+  const el = $('chart-container');
+  const active = document.fullscreenElement || document.webkitFullscreenElement;
+  if (!active) {
+    (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  }
+}
+
+function updateFullscreenButton() {
+  const el = $('chart-container');
+  const active = document.fullscreenElement === el || document.webkitFullscreenElement === el;
+  $('fullscreen-btn').textContent = active ? '⛶ Exit full screen' : '⛶ Full screen';
+}
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+
 function wireControls() {
   $('lookback-range').addEventListener('input', (e) => {
     $('lookback-val').textContent = e.target.value;
@@ -956,8 +1031,10 @@ function wireControls() {
 
   $('export-btn').addEventListener('click', exportCsv);
   $('refresh-btn').addEventListener('click', refreshAll);
+  $('fullscreen-btn').addEventListener('click', toggleChartFullscreen);
 
-  $('lt-run-btn').addEventListener('click', runLongTermScreen);
+  $('show-bounds-toggle').addEventListener('change', applyBoundsDisplay);
+  $('show-hmm-toggle').addEventListener('change', applyHmmDisplay);
 }
 
 async function loadUniverse() {
@@ -986,4 +1063,9 @@ async function loadUniverse() {
   Charts.renderDonut(0, 0);
   Charts.renderHistogram([]);
   setInterval(tickNextScan, 1000);
+  // Sector cards are otherwise only refreshed by a new SSE signal or a
+  // manual ⟳ — this catches everything else that can change their color
+  // (a scan that ran without landing a fresh signal, another browser tab
+  // clearing history) so "today" doesn't silently go stale mid-session.
+  setInterval(refreshSectorStats, 60000);
 })();

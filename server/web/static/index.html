@@ -60,7 +60,7 @@
       <span class="hint" id="sector-stats-date"></span>
     </div>
     <div class="sector-stats-grid" id="sector-stats-grid">
-      <div class="feed-empty">No signals yet today.</div>
+      <div class="feed-empty">No signals recorded yet — start the scanner.</div>
     </div>
   </section>
 
@@ -201,22 +201,32 @@
           <option value="6mo">6mo</option>
           <option value="max">max</option>
         </select>
-        <label class="chk-field" title="Two straight trendlines from the lowest-open candle: Peaks through swing highs, Troughs through swing lows. Needs at least 3 confirming candles or it doesn't draw.">
+        <div class="ma-selector" title="Which moving averages to overlay on the chart">
+          <label class="chk-field"><input type="checkbox" class="ma-toggle" value="SMA20" checked> SMA20</label>
+          <label class="chk-field"><input type="checkbox" class="ma-toggle" value="SMA50" checked> SMA50</label>
+          <label class="chk-field"><input type="checkbox" class="ma-toggle" value="SMA100"> SMA100</label>
+          <label class="chk-field"><input type="checkbox" class="ma-toggle" value="SMA150" checked> SMA150</label>
+          <label class="chk-field"><input type="checkbox" class="ma-toggle" value="SMA200"> SMA200</label>
+        </div>
+        <label class="chk-field" title="Two straight trendlines from the lowest-open candle: Peaks through swing highs, Troughs through swing lows. Needs at least 3 confirming candles or it doesn't draw. Toggling this updates the chart immediately, no need to click Analyse again.">
           <input type="checkbox" id="show-bounds-toggle"> Peaks &amp; Troughs
         </label>
-        <label class="chk-field" title="Inline 3-state Gaussian HMM fit on this chart's own data — projected forward, not a persisted model">
+        <label class="chk-field" title="Inline 3-state Gaussian HMM fit on this chart's own data — projected forward, not a persisted model. Toggling this updates the chart immediately, no need to click Analyse again.">
           <input type="checkbox" id="show-hmm-toggle"> HMM projection
         </label>
         <button id="analyse-btn" class="btn btn-start">🔎 Analyse</button>
+        <button id="fullscreen-btn" class="btn" title="View the chart full screen">⛶ Full screen</button>
       </div>
     </div>
 
     <div class="verdict-banner" id="verdict-banner" hidden></div>
     <div class="entry-price-banner" id="entry-price-banner" hidden></div>
     <div class="hmm-banner" id="hmm-banner" hidden></div>
+    <div class="long-term-banner" id="long-term-banner" hidden></div>
 
     <div id="chart-container" class="chart-container">
       <div class="chart-placeholder" id="chart-placeholder">Pick a symbol and click Analyse.</div>
+      <div class="chart-legend" id="chart-legend" hidden></div>
     </div>
 
     <div class="strategy-table-wrap">
@@ -268,43 +278,6 @@
       <div class="news-list" id="news-list"></div>
       <div class="feed-empty" id="news-empty" hidden>No recent news found for this symbol.</div>
     </div>
-  </section>
-
-  <!-- ── Long-Term Value Screen ───────────────────────────────────── -->
-  <section class="panel long-term-panel">
-    <div class="panel-head">
-      <h2 class="panel-title">Long-Term Value Screen</h2>
-      <div class="long-term-controls">
-        <label class="lt-field" title="Maximum trailing P/E to include">
-          Max P/E <input id="lt-max-pe" type="number" min="1" step="1" value="35">
-        </label>
-        <label class="lt-field" title="Minimum Close/SMA150 ratio (1.0 = price at its 150-day average)">
-          Min Price/SMA150 <input id="lt-min-trend" type="number" min="0.5" step="0.05" value="1.0">
-        </label>
-        <label class="lt-field" title="Maximum Close/SMA150 ratio, so an overextended stock doesn't rank">
-          Max Price/SMA150 <input id="lt-max-trend" type="number" min="1" step="0.05" value="1.5">
-        </label>
-        <button id="lt-run-btn" class="btn btn-start">🔎 Run Screen</button>
-      </div>
-    </div>
-    <p class="hint">
-      Ranks the current universe on a good long-term ratio between the 150-day moving
-      average, trailing P/E and EPS: price in a healthy uptrend above SMA150 (but not
-      overextended), a reasonable valuation, and real earnings behind it. A fundamentals
-      screen, not a backtested crossover strategy — no ROI figures apply.
-    </p>
-    <div class="long-term-table-wrap">
-      <table class="long-term-table" id="long-term-table" hidden>
-        <thead>
-          <tr>
-            <th>Symbol</th><th>Price</th><th>SMA150</th><th>Price/SMA150</th>
-            <th>P/E</th><th>EPS</th><th>Earnings Yield</th><th>Score</th>
-          </tr>
-        </thead>
-        <tbody id="long-term-tbody"></tbody>
-      </table>
-    </div>
-    <div class="feed-empty" id="long-term-empty">Click &ldquo;Run Screen&rdquo; to rank the current universe.</div>
   </section>
 
   <!-- ── Distribution mini-charts ─────────────────────────────────── -->

@@ -381,6 +381,40 @@ class TestSectorMap:
             scraping.get_sector_map(min_market_cap=1e9)
         assert mock_screen.call_count == len(scraping.GICS_SECTORS)
 
+    def _sector_of(self, query):
+        return next(op['operands'][1] for op in query.to_dict()['operands']
+                   if op.get('operator') == 'EQ')
+
+    def test_one_sector_failing_does_not_drop_the_others(self):
+        scraping._us_equities_cache.clear()
+        scraping._sector_map_cache.clear()
+
+        def fake_screen(query, **kwargs):
+            sector = self._sector_of(query)
+            if sector == 'Healthcare':
+                raise RuntimeError('boom')   # deliberately not a retryable-looking message
+            return self._page([sector.replace(' ', '_').upper() + '_SYM'])
+
+        with patch.object(scraping.yf, 'screen', side_effect=fake_screen):
+            mapping = scraping.get_sector_map(min_market_cap=1e9)
+
+        assert mapping['TECHNOLOGY_SYM'] == 'Technology'
+        assert 'HEALTHCARE_SYM' not in mapping
+        assert len(mapping) == len(scraping.GICS_SECTORS) - 1
+
+    def test_every_sector_failing_returns_empty_and_is_not_cached(self):
+        scraping._us_equities_cache.clear()
+        scraping._sector_map_cache.clear()
+
+        with patch.object(scraping.yf, 'screen', side_effect=RuntimeError('down')) as mock_screen:
+            mapping = scraping.get_sector_map(min_market_cap=1e9)
+            assert mapping == {}
+            # A total failure must not get baked into the cache — the very
+            # next call should retry every sector, not serve a poisoned {}.
+            scraping.get_sector_map(min_market_cap=1e9)
+
+        assert mock_screen.call_count == 2 * len(scraping.GICS_SECTORS)
+
 
 class TestCleanOHLCV:
     def _partial_tail(self):
@@ -1332,6 +1366,33 @@ class TestScanner:
 
     def test_scan_returns_empty_without_data(self):
         assert scanner.scan([], stock_data={}, use_processes=False) == []
+
+    def test_scan_on_result_fires_once_per_signal_with_the_right_frame(self, df_up):
+        seen = []
+        with patch.object(strategy, 'what_is_signal', return_value=False):
+            scanner.scan(['A', 'B'], stock_data={'A': df_up, 'B': df_up},
+                        use_processes=False, on_result=lambda r, df: seen.append((r, df)))
+        assert len(seen) == 2
+        assert {r['symbol'] for r, _ in seen} == {'A', 'B'}
+        for r, df in seen:
+            assert df is df_up
+
+    def test_scan_on_result_not_called_when_no_signal(self, df_up):
+        calls = []
+        with patch.object(strategy, 'what_is_signal', return_value=None):
+            found = scanner.scan(['A'], stock_data={'A': df_up},
+                                 use_processes=False, on_result=lambda r, df: calls.append(r))
+        assert found == []
+        assert calls == []
+
+    def test_scan_on_result_exception_does_not_break_the_scan(self, df_up):
+        def _boom(r, df):
+            raise RuntimeError('subscriber exploded')
+
+        with patch.object(strategy, 'what_is_signal', return_value=False):
+            found = scanner.scan(['A', 'B'], stock_data={'A': df_up, 'B': df_up},
+                                 use_processes=False, on_result=_boom)
+        assert len(found) == 2   # the scan itself still completed and returned both
 
     def test_intraday_gate(self):
         with patch.object(scraping, 'is_nyse_open', return_value=False):

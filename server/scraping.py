@@ -696,6 +696,13 @@ def get_sector_map(min_market_cap: float = SECTOR_MAP_MIN_MARKET_CAP,
     — still a handful of batched, paginated requests total, not one .info
     call per symbol — and tags every symbol in each result with the sector
     that was queried for it.
+
+    One sector's query failing (a transient rate limit, a timeout on that
+    particular request) does not fail the other ten — those symbols just fall
+    under 'Unknown' downstream (see web.app.sector_summary), same as a symbol
+    below this function's own market-cap floor. Before this, any single
+    sector's exception killed the whole map and 502'd the "Today's Signals by
+    Sector" panel for every symbol, not just the ones in the failing sector.
     """
     cache_key = (round(min_market_cap), tuple(exchanges))
     cached = _sector_map_cache.get(cache_key)
@@ -704,11 +711,20 @@ def get_sector_map(min_market_cap: float = SECTOR_MAP_MIN_MARKET_CAP,
 
     mapping: dict[str, str] = {}
     for sector in GICS_SECTORS:
-        equities = get_us_equities(min_market_cap, exchanges=exchanges, sector=sector)
+        try:
+            equities = get_us_equities(min_market_cap, exchanges=exchanges, sector=sector)
+        except Exception as e:
+            print(f'[get_sector_map] {sector}: {e}')
+            continue
         for e in equities:
             mapping[e['symbol']] = sector
 
-    _sector_map_cache[cache_key] = (datetime.now(), mapping)
+    # Only cache a result at least one sector actually contributed to — if
+    # every sector failed (e.g. a broad rate-limit event), an empty mapping
+    # would otherwise get baked in for _SECTOR_MAP_CACHE_TTL, turning every
+    # symbol 'Unknown' for 6h instead of letting the next request retry.
+    if mapping:
+        _sector_map_cache[cache_key] = (datetime.now(), mapping)
     return mapping
 
 

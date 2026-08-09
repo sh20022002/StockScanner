@@ -158,37 +158,126 @@ def _should_scan_this_iteration(force_first: bool, timeframe: str) -> bool:
     return force_first or scanner.should_scan_now(timeframe)
 
 
+def _lt_row_to_signal(row: dict) -> dict:
+    """
+    Adapt a long_term_screen.screen() row into the signal-dict shape the feed,
+    history table and signal_log already expect. It's a pass/fail
+    fundamentals screen, not a backtested strategy, so the ROI-ish fields
+    genuinely don't apply — left None rather than faked as 0 (the frontend's
+    fmtPct already renders None as '—').
+    """
+    return {
+        **row,
+        'direction':     'BUY',   # the screen only surfaces buy-quality candidates
+        'timeframe':     '1d',
+        'roi':           None,
+        'benchmark_roi': None,
+        'excess_roi':    None,
+        'win_rate':      None,
+        'trades':        None,
+        'avg_roi':       None,
+        'avg_win_rate':  None,
+    }
+
+
+def _run_scan_cycle(on_signal) -> tuple[int, int]:
+    """
+    The actual work for one scan cycle: the 12-strategy technical scan plus
+    the long-term value screen, run off the event loop thread (called via
+    asyncio.to_thread from _scanner_loop).
+
+    Each result is pushed through on_signal the moment it's computed, not
+    batched until the whole cycle finishes — a full-universe scan can run for
+    minutes, and holding every signal back until the last symbol completes is
+    the opposite of "live." The long-term screen runs in this same cycle,
+    right after the technical scan, reusing its batch-downloaded frames when
+    the scanner's own timeframe is already daily (SMA150 has to mean the
+    daily 150-bar average — see long_term_screen's module docstring — so a
+    non-daily scanner timeframe pays for its own small daily download here
+    instead of reusing frames that would give it the wrong indicator).
+
+    Returns (technical_signal_count, long_term_signal_count) for status
+    bookkeeping.
+    """
+    def _on_technical_result(entry, df):
+        if rl_live is not None:
+            try:
+                rl_live.annotate([entry], {entry['symbol']: df})
+            except Exception as e:
+                log.warning('RL annotate failed for %s: %s', entry.get('symbol'), e)
+        on_signal(entry)
+
+    found, stock_data = scanner.scan(
+        state.symbols, timeframe=state.timeframe, lookback=state.lookback,
+        min_margin=state.min_margin, quiet=True, return_data=True,
+        on_result=_on_technical_result,
+    )
+
+    lt_stock_data = stock_data if state.timeframe == '1d' else None
+    try:
+        lt_rows = long_term_screen.screen(state.symbols, stock_data=lt_stock_data, timeframe='1d')
+    except Exception as e:
+        log.warning('long-term value screen failed: %s', e)
+        lt_rows = []
+    for row in lt_rows:
+        entry = _lt_row_to_signal(row)
+        try:
+            on_signal(entry)
+        except Exception as e:
+            # scanner.scan() already isolates on_result failures per-symbol
+            # (see scan()'s _emit) — this loop needs the same guarantee so
+            # one bad push (a write failure, a broken subscriber) doesn't
+            # drop every long-term row after it.
+            log.warning('on_signal failed for %s: %s', entry.get('symbol'), e)
+
+    return len(found), len(lt_rows)
+
+
 async def _scanner_loop():
     """Mirrors scanner semantics from the old Streamlit thread, as an asyncio task."""
     force_first_scan = True
+    loop = asyncio.get_running_loop()
+
+    def _on_signal(entry: dict):
+        # Runs on _run_scan_cycle's worker thread (asyncio.to_thread), not the
+        # event loop thread — signal_log's own lock is a plain threading.Lock
+        # so its file I/O is fine here directly, but reaching state.subscribers
+        # and pushing over SSE has to hop back onto the loop.
+        #
+        # Defensive on purpose: scanner.scan() already isolates on_result
+        # failures per-symbol (see scan()'s _emit), but _run_scan_cycle's
+        # long-term-screen loop calls this directly with no such wrapper —
+        # one bad write (e.g. a transient Windows file-lock on
+        # signals_log.json) must not abort the rest of that loop, let alone
+        # the whole scan cycle.
+        try:
+            fresh = signal_log.add_signals([entry])
+        except Exception as e:
+            log.warning('failed to log signal for %s: %s', entry.get('symbol'), e)
+            return
+        for fresh_entry in fresh:
+            fut = asyncio.run_coroutine_threadsafe(
+                broadcast({'type': 'signal', 'data': json_ok(fresh_entry)}), loop)
+            fut.add_done_callback(
+                lambda f: f.exception() and log.warning('signal broadcast failed: %s', f.exception()))
+
     while state.running:
         try:
             if _should_scan_this_iteration(force_first_scan, state.timeframe):
                 # is_scanning is its own broadcast, separate from the one after
                 # the scan completes below, so a slow scan (batch download +
-                # 12 strategies x however many symbols) shows as "in progress"
-                # for its actual duration instead of only flipping on and off
-                # around a single status push.
+                # 12 strategies x however many symbols, plus the long-term
+                # screen) shows as "in progress" for its actual duration
+                # instead of only flipping on and off around a single status
+                # push. Individual signals are pushed by _on_signal as they're
+                # found during the scan below, not held back until it returns.
                 state.is_scanning = True
                 await broadcast({'type': 'status', 'data': json_ok(state.status())})
                 try:
-                    want_data = rl_live is not None
-                    result = await asyncio.to_thread(
-                        scanner.scan, state.symbols,
-                        timeframe=state.timeframe, lookback=state.lookback,
-                        min_margin=state.min_margin, quiet=True, return_data=want_data,
-                    )
-                    if want_data:
-                        found, stock_data = result
-                        found = await asyncio.to_thread(rl_live.annotate, found, stock_data)
-                    else:
-                        found = result
-                    fresh = signal_log.add_signals(found)
+                    technical_count, lt_count = await asyncio.to_thread(_run_scan_cycle, _on_signal)
                     state.last_scan_at = datetime.now(timezone.utc).isoformat()
-                    state.last_scan_count = len(found)
+                    state.last_scan_count = technical_count + lt_count
                     state.last_error = None
-                    for entry in fresh:
-                        await broadcast({'type': 'signal', 'data': json_ok(entry)})
                 finally:
                     state.is_scanning = False
                 await broadcast({'type': 'status', 'data': json_ok(state.status())})
@@ -329,8 +418,14 @@ def get_signals_summary():
     buys  = [s for s in signals if s.get('direction') == 'BUY']
     sells = [s for s in signals if s.get('direction') == 'SELL']
     beat  = [s for s in signals if (s.get('excess_roi') or 0) > 0]
-    avg_excess = (sum(s.get('excess_roi', 0) for s in signals) / len(signals)) if signals else 0
-    hist = [s.get('excess_roi', 0) for s in signals]
+    # `.get(key, 0)` only falls back on a MISSING key — a long_term_value
+    # signal has the key present but explicitly None (it's a pass/fail
+    # fundamentals screen with no ROI figures, see _lt_row_to_signal), which
+    # used to reach sum() as None and crash the whole endpoint the first
+    # time one landed in the log. `or 0` treats missing and None the same,
+    # matching the `beat` filter just above.
+    avg_excess = (sum(s.get('excess_roi') or 0 for s in signals) / len(signals)) if signals else 0
+    hist = [s.get('excess_roi') or 0 for s in signals]
     return json_ok({
         'total':       len(signals),
         'buys':        len(buys),
@@ -359,6 +454,10 @@ def sector_summary(signals: list[dict], sector_map: dict[str, str], today: str) 
     the screener no longer carries) is grouped under 'Unknown' rather than
     silently dropped — the daily total across sectors should still add up to
     the actual number of signals today.
+
+    Each row also carries `symbols` (deduplicated, first-seen order) — the
+    dashboard's sector cards are clickable, and this is what lets a click
+    jump straight to a stock from that sector without a second round trip.
     """
     todays = [s for s in signals if str(s.get('time', ''))[:10] == today]
 
@@ -366,7 +465,8 @@ def sector_summary(signals: list[dict], sector_map: dict[str, str], today: str) 
     for s in todays:
         sector = sector_map.get(s.get('symbol'), 'Unknown')
         b = buckets.setdefault(sector, {'sector': sector, 'total': 0, 'buys': 0,
-                                        'sells': 0, 'beat_bench': 0, '_excess_sum': 0.0})
+                                        'sells': 0, 'beat_bench': 0, '_excess_sum': 0.0,
+                                        'symbols': []})
         b['total'] += 1
         if s.get('direction') == 'BUY':
             b['buys'] += 1
@@ -376,6 +476,9 @@ def sector_summary(signals: list[dict], sector_map: dict[str, str], today: str) 
         b['_excess_sum'] += excess
         if excess > 0:
             b['beat_bench'] += 1
+        symbol = s.get('symbol')
+        if symbol and symbol not in b['symbols']:
+            b['symbols'].append(symbol)
 
     rows = [{
         'sector':     b['sector'],
@@ -384,19 +487,30 @@ def sector_summary(signals: list[dict], sector_map: dict[str, str], today: str) 
         'sells':      b['sells'],
         'beat_bench': b['beat_bench'],
         'avg_excess': round(b['_excess_sum'] / b['total'], 2),
+        'symbols':    b['symbols'],
     } for b in buckets.values()]
     rows.sort(key=lambda r: -r['total'])
     return rows
 
 
+def _most_recent_signal_day(signals: list[dict]) -> str | None:
+    """The latest 'YYYY-MM-DD' among signals, or None if there are no signals at all."""
+    days = [str(s['time'])[:10] for s in signals if s.get('time')]
+    return max(days) if days else None
+
+
 @app.get('/api/signals/sector-summary')
 async def get_sector_summary():
     """
-    Today's signals grouped by sector.
+    Signals grouped by sector for the day they actually happened.
 
     "Today" is the NYSE-local date (scraping.get_exchange_time), matching
-    what signals are actually keyed on — a daily bar's date, not a wall-clock
-    timestamp in the server's or browser's own timezone.
+    what signals are actually keyed on. If today has no signals yet — the
+    scanner hasn't run today, the market just opened, it's a weekend — this
+    falls back to the most recent day that has any, so the panel shows the
+    last real scan instead of sitting on "No signals yet today" all day
+    every day until the next fresh signal happens to land. `is_today` in the
+    response tells the frontend which case it's looking at.
     """
     today = scraping.get_exchange_time().strftime('%Y-%m-%d')
     signals = signal_log.load_signals()
@@ -404,7 +518,16 @@ async def get_sector_summary():
         sector_map = await asyncio.to_thread(scraping.get_sector_map)
     except Exception as e:
         raise HTTPException(502, f'Failed to load the sector map: {e}')
-    return json_ok({'date': today, 'sectors': sector_summary(signals, sector_map, today)})
+
+    date_used = today
+    rows = sector_summary(signals, sector_map, today)
+    if not rows:
+        fallback_day = _most_recent_signal_day(signals)
+        if fallback_day and fallback_day != today:
+            date_used = fallback_day
+            rows = sector_summary(signals, sector_map, fallback_day)
+
+    return json_ok({'date': date_used, 'is_today': date_used == today, 'sectors': rows})
 
 
 # ---------------------------------------------------------------------------

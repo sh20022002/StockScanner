@@ -20,14 +20,20 @@ from long_term_screen import _clamp01, _score, screen
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def make_frame(close: float, sma150: float, n: int = 5) -> pl.DataFrame:
-    """A minimal OHLCV+SMA150 frame — only the columns screen() reads."""
+def make_frame(close: float, sma150: float, n: int = 5,
+              sma100: float | None = None, sma200: float | None = None) -> pl.DataFrame:
+    """A minimal OHLCV+SMA frame — only the columns screen() reads."""
     dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(n)]
-    return pl.DataFrame({
+    cols = {
         'Datetime': dates,
         'Close':    [close] * n,
         'SMA150':   [sma150] * n,
-    })
+    }
+    if sma100 is not None:
+        cols['SMA100'] = [sma100] * n
+    if sma200 is not None:
+        cols['SMA200'] = [sma200] * n
+    return pl.DataFrame(cols)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +189,55 @@ class TestScreen:
             rows = screen(['AAPL'])
         mock_dl.assert_called_once()
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# SMA100 / SMA200 (informational, non-gating)
+# ---------------------------------------------------------------------------
+
+class TestSma100Sma200:
+    def test_included_as_context_when_present(self):
+        stock_data = {'AAPL': make_frame(close=150.0, sma150=120.0, sma100=140.0, sma200=100.0)}
+        with patch.object(scraping, 'get_fundamentals',
+                          return_value={'AAPL': {'trailing_pe': 20.0, 'trailing_eps': 6.0}}):
+            rows = screen(['AAPL'], stock_data=stock_data)
+
+        assert len(rows) == 1
+        r = rows[0]
+        assert r['sma100'] == 140.0
+        assert r['sma200'] == 100.0
+        assert r['sma100_ratio'] == pytest.approx(150.0 / 140.0, abs=0.001)
+        assert r['sma200_ratio'] == pytest.approx(150.0 / 100.0, abs=0.001)
+
+    def test_none_when_columns_missing_does_not_exclude_the_symbol(self):
+        # make_frame's default omits SMA100/SMA200 entirely -- the symbol
+        # must still pass since only SMA150 gates inclusion.
+        stock_data = {'AAPL': make_frame(close=150.0, sma150=120.0)}
+        with patch.object(scraping, 'get_fundamentals',
+                          return_value={'AAPL': {'trailing_pe': 20.0, 'trailing_eps': 6.0}}):
+            rows = screen(['AAPL'], stock_data=stock_data)
+
+        assert len(rows) == 1
+        assert rows[0]['sma100'] is None
+        assert rows[0]['sma200'] is None
+        assert rows[0]['sma100_ratio'] is None
+        assert rows[0]['sma200_ratio'] is None
+
+    def test_does_not_affect_trend_gating_or_score(self):
+        # Same SMA150/trend_ratio/P-E/EPS, only SMA100/SMA200 differ (one
+        # frame has them, one doesn't) -- score and pass/fail must match.
+        with_context = {'AAPL': make_frame(close=150.0, sma150=120.0, sma100=140.0, sma200=100.0)}
+        without_context = {'MSFT': make_frame(close=150.0, sma150=120.0)}
+        fundamentals = {
+            'AAPL': {'trailing_pe': 20.0, 'trailing_eps': 6.0},
+            'MSFT': {'trailing_pe': 20.0, 'trailing_eps': 6.0},
+        }
+        with patch.object(scraping, 'get_fundamentals', return_value=fundamentals):
+            rows_a = screen(['AAPL'], stock_data=with_context)
+            rows_b = screen(['MSFT'], stock_data=without_context)
+
+        assert rows_a[0]['score'] == rows_b[0]['score']
+        assert rows_a[0]['trend_ratio'] == rows_b[0]['trend_ratio']
 
 
 # ---------------------------------------------------------------------------

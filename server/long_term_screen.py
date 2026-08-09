@@ -3,17 +3,23 @@ Long-term value screen.
 
 Ranks symbols on a "good ratio" between three long-term signals: price
 sitting in a healthy uptrend relative to its 150-period moving average, a
-reasonable P/E, and real (positive) earnings behind it. This is a genuinely
-different methodology from the 12 strategies in strategy.py — see
-LONG_TERM_TIMEFRAMES's docstring in scanner.py, which is explicit that the
-existing 'horizon' field is a timeframe proxy, not a fundamentals screen.
+reasonable P/E, and real (positive) earnings behind it. SMA100 and SMA200
+ride along as informational context (not additional gates — see `screen`'s
+docstring) so a result can be read against the shorter and longer ends of
+the moving-average ribbon, not just the 150-day line the pass/fail bounds
+are keyed on. This is a genuinely different methodology from the 12
+strategies in strategy.py — see LONG_TERM_TIMEFRAMES's docstring in
+scanner.py, which is explicit that the existing 'horizon' field is a
+timeframe proxy, not a fundamentals screen.
 
 Kept out of the Strategy/STRATEGY_NAMES machinery on purpose: those 12
 strategies each backtest a bar-to-bar crossover signal with a real
 train/test P&L. P/E and EPS don't move bar-to-bar, so there is no
-meaningful backtest here — this is a pass/fail screen with a ranking score,
-run on demand rather than on every scan cycle (see
-scraping.get_fundamentals for why it stays off the auto-scan hot path).
+meaningful backtest here — this is a pass/fail screen with a ranking score.
+It runs both on demand (GET /api/long-term-screen) and automatically once
+per auto-scan cycle (web.app._run_scan_cycle) — see scraping.get_fundamentals
+for why the network-heavier P/E/EPS lookup still only ever runs for symbols
+that already passed the free trend check, not the whole universe.
 """
 import scraping
 
@@ -56,14 +62,21 @@ def screen(symbols: list,
     Rank symbols by the long-term value ratio, best first.
 
     Two-stage on purpose: the trend filter runs first against OHLCV data
-    that's already batch-downloaded for free (SMA150 is computed by
-    scraping.compute_indicators on every frame already), so the separate,
-    per-symbol P/E-and-EPS network call in scraping.get_fundamentals only
-    ever runs for the survivors instead of the whole universe.
+    that's already batch-downloaded for free (SMA100/150/200 are all
+    computed by scraping.compute_indicators on every frame already), so the
+    separate, per-symbol P/E-and-EPS network call in scraping.get_fundamentals
+    only ever runs for the survivors instead of the whole universe. Only
+    SMA150 gates inclusion (see module docstring) — SMA100/SMA200 are carried
+    through as context and never shrink or grow the result set, so adding
+    them can't silently change which symbols pass.
 
-    Returns a list of dicts (symbol, price, sma150, trend_ratio, pe_ratio,
-    eps, earnings_yield, score, strategy, horizon), sorted by score
-    descending.
+    Returns a list of dicts (symbol, price, sma100, sma150, sma200,
+    trend_ratio, sma100_ratio, sma200_ratio, pe_ratio, eps, earnings_yield,
+    score, strategy, horizon), sorted by score descending. sma100_ratio and
+    sma200_ratio are None when that symbol's frame doesn't have enough
+    history for the indicator yet (thin listings) — the SMA150 ratio the
+    screen actually gates on always exists for anything that reaches this
+    list.
     """
     if stock_data is None:
         stock_data = scraping.batch_download(
@@ -79,7 +92,14 @@ def screen(symbols: list,
             continue
         ratio = close / sma150
         if min_trend_ratio <= ratio <= max_trend_ratio:
-            trend_pass[sym] = (float(close), float(sma150), float(ratio), str(df['Datetime'][-1]))
+            sma100 = df['SMA100'][-1] if 'SMA100' in df.columns else None
+            sma200 = df['SMA200'][-1] if 'SMA200' in df.columns else None
+            trend_pass[sym] = {
+                'close': float(close), 'sma150': float(sma150), 'trend_ratio': float(ratio),
+                'sma100': float(sma100) if sma100 else None,
+                'sma200': float(sma200) if sma200 else None,
+                'time': str(df['Datetime'][-1]),
+            }
 
     if not trend_pass:
         return []
@@ -87,7 +107,7 @@ def screen(symbols: list,
     fundamentals = scraping.get_fundamentals(list(trend_pass.keys()), quiet=quiet)
 
     results = []
-    for sym, (close, sma150, trend_ratio, time) in trend_pass.items():
+    for sym, t in trend_pass.items():
         fund = fundamentals.get(sym)
         if not fund:
             continue
@@ -95,17 +115,22 @@ def screen(symbols: list,
         if pe is None or eps is None or pe <= 0 or eps <= 0 or pe > max_pe:
             continue
 
+        close = t['close']
         earnings_yield = eps / close
         results.append({
             'symbol':         sym,
-            'time':           time,
+            'time':           t['time'],
             'price':          round(close, 2),
-            'sma150':         round(sma150, 2),
-            'trend_ratio':    round(trend_ratio, 3),
+            'sma100':         round(t['sma100'], 2) if t['sma100'] else None,
+            'sma150':         round(t['sma150'], 2),
+            'sma200':         round(t['sma200'], 2) if t['sma200'] else None,
+            'trend_ratio':    round(t['trend_ratio'], 3),
+            'sma100_ratio':   round(close / t['sma100'], 3) if t['sma100'] else None,
+            'sma200_ratio':   round(close / t['sma200'], 3) if t['sma200'] else None,
             'pe_ratio':       round(pe, 2),
             'eps':            round(eps, 2),
             'earnings_yield': round(earnings_yield * 100, 2),
-            'score':          _score(trend_ratio, pe, earnings_yield,
+            'score':          _score(t['trend_ratio'], pe, earnings_yield,
                                      min_trend_ratio, max_trend_ratio, max_pe),
             'strategy':       'long_term_value',
             'horizon':        'long_term',
